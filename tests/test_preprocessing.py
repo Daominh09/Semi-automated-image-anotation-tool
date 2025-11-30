@@ -4,28 +4,38 @@ Test script for Person A - Edge Detection Module
 
 import cv2
 import numpy as np
-import sys
-sys.path.append('..')
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 from modules.preprocessing import EdgeDetector
 
 
-def test_edge_detection():
+def test_edge_detection(test_image_path: str = None):
     """Test edge detection on sample images"""
     print("="*60)
     print("Testing Person A - Edge Detection Module")
     print("="*60)
-    
-    # Create test image (simple geometric shapes)
-    test_image = np.zeros((400, 400, 3), dtype=np.uint8)
-    test_image[:] = (200, 200, 200)  # Gray background
-    
-    # Draw some shapes
-    cv2.rectangle(test_image, (50, 50), (150, 150), (255, 0, 0), -1)
-    cv2.circle(test_image, (250, 100), 50, (0, 255, 0), -1)
-    cv2.ellipse(test_image, (150, 300), (80, 40), 45, 0, 360, (0, 0, 255), -1)
-    
+
     # Initialize detector
     detector = EdgeDetector()
+
+    # Load test image
+    if test_image_path is None:
+        # Create test image (simple geometric shapes)
+        test_image = np.zeros((400, 400, 3), dtype=np.uint8)
+        test_image[:] = (200, 200, 200)  # Gray background
+        
+        # Draw some shapes
+        cv2.rectangle(test_image, (50, 50), (150, 150), (255, 0, 0), -1)
+        cv2.circle(test_image, (250, 100), 50, (0, 255, 0), -1)
+        cv2.ellipse(test_image, (150, 300), (80, 40), 45, 0, 360, (0, 0, 255), -1)
+    else:
+        test_image = detector.load_image(test_image_path)
+        if test_image is None:
+            print("Failed to load test image. Exiting tests.")
+            return
+    
     
     # Test 1: Basic Canny edge detection
     print("\nTest 1: Canny Edge Detection")
@@ -73,8 +83,9 @@ def test_edge_detection():
         edges_canny,
         edges_iterative
     ])
-    
-    cv2.imwrite('../data/output/test_edges.png', combined)
+    os.makedirs(os.path.join(PROJECT_ROOT, 'data', 'output'), exist_ok=True)
+    cv2.imwrite(os.path.join(PROJECT_ROOT, 'data', 'output', 'test_edges.png'), combined)
+    cv2.imwrite(os.path.join(PROJECT_ROOT, 'data', 'output', 'og_test_edges.png'), test_image)
     print("  Saved: data/output/test_edges.png")
     print("  (Original | Canny | Iterative)")
     
