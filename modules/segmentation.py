@@ -98,20 +98,26 @@ class RegionGrowing:
         if not c: return None
         return max(c,key=cv2.contourArea)
     
-    def segment(self,img,t=None,smooth=True):
-        if len(self.seeds)==0:
-            return np.zeros(img.shape[:2],np.uint8),[]
-        m = self.region_grow_multi_seed(img,self.seeds,t)
-        if smooth: m=self.smooth_mask(m)
-        c,_ = self.extract_contours(m)
-        self.current_mask = m
-        return m,c
-    
-    def draw_contours_on_image(self,img,c,color=(0,255,0),thick=2):
+    def segment(self, img, threshold=None, smooth=True):
+        # threshold here is the same thing as "t" before
+        if len(self.seeds) == 0:
+            return np.zeros(img.shape[:2], np.uint8), []
+
+        # pass threshold directly to the region growing
+        mask = self.region_grow_multi_seed(img, self.seeds, threshold)
+
+        if smooth:
+            mask = self.smooth_mask(mask)
+
+        contours, _ = self.extract_contours(mask)
+        self.current_mask = mask
+        return mask, contours
+
+    def draw_contours_on_image(self, img, c, color=(0, 255, 0), thickness=2):
         res = img.copy()
-        cv2.drawContours(res,c,-1,color,thick)
+        cv2.drawContours(res, c, -1, color, thickness)
         return res
-    
+
     def create_overlay(self,img,mask,alpha=0.3,color=(0,255,0)):
         over = img.copy()
         cm = np.zeros_like(img)
