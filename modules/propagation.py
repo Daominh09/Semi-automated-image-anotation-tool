@@ -1,313 +1,431 @@
 """
-Person D: Feature Matching & Annotation Propagation Module
-Handles SIFT/ORB feature matching and annotation transfer between frames
+Simplified Feature Matching & Annotation Propagation using SIFT
 """
 
 import cv2
 import numpy as np
+import random
 from typing import Tuple, Optional, List
 
 
 class AnnotationPropagator:
-    """Propagates annotations between frames using feature matching"""
+    """Propagates annotations between frames using SIFT feature matching"""
     
-    # Recommended default parameters
-    DEFAULT_FEATURE_TYPE = 'ORB'  # 'ORB' or 'SIFT'
-    DEFAULT_MATCH_RATIO = 0.75    # Lowe's ratio test threshold
+    # SIFT parameters
+    DEFAULT_MATCH_RATIO = 0.85
     DEFAULT_RANSAC_THRESHOLD = 5.0
-    DEFAULT_MIN_MATCHES = 10
+    DEFAULT_MIN_MATCHES = 3
     
-    def __init__(self, feature_type: str = 'ORB'):
-        """
-        Initialize propagator with specified feature detector
-        
-        Args:
-            feature_type: 'ORB' or 'SIFT'
-        """
-        self.feature_type = feature_type.upper()
+    def __init__(self,
+                prev_sift_params=None,
+                next_sift_params=None):
+
+        # Default SIFT params if none provided
+        default_prev = dict(nfeatures=10000, contrastThreshold=0.08,
+                            edgeThreshold=10)
+        default_next = dict(nfeatures=10000, contrastThreshold=0.08,
+                            edgeThreshold=10)
+
+        prev_sift_params = prev_sift_params or default_prev
+        next_sift_params = next_sift_params or default_next
+
+        # Create TWO separate SIFT detectors
+        self.detector_prev = cv2.SIFT_create(**prev_sift_params)
+        self.detector_next = cv2.SIFT_create(**next_sift_params)
+
+        # Other parameters
         self.match_ratio = self.DEFAULT_MATCH_RATIO
-        self.ransac_threshold = self.DEFAULT_RANSAC_THRESHOLD
         self.min_matches = self.DEFAULT_MIN_MATCHES
-        
-        # Initialize feature detector
-        if self.feature_type == 'ORB':
-            self.detector = cv2.ORB_create(nfeatures=2000)
-            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        elif self.feature_type == 'SIFT':
-            self.detector = cv2.SIFT_create()
-            self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
-        else:
-            raise ValueError(f"Unknown feature type: {feature_type}")
+
     
-    def detect_and_compute(self, image: np.ndarray, 
-                          mask: Optional[np.ndarray] = None) -> Tuple[List, np.ndarray]:
-        """
-        Detect keypoints and compute descriptors
-        
-        Args:
-            image: Input grayscale image
-            mask: Optional mask to restrict feature detection
-            
-        Returns:
-            Tuple of (keypoints, descriptors)
-        """
-        keypoints, descriptors = self.detector.detectAndCompute(image, mask)
+    def detect_and_compute(self, image, mask=None, use_prev=False):
+        detector = self.detector_prev if use_prev else self.detector_next
+        keypoints, descriptors = detector.detectAndCompute(image, mask)
         return keypoints, descriptors
+
     
     def extract_object_features(self, image: np.ndarray, 
                                mask: np.ndarray) -> Tuple[List, np.ndarray]:
-        """
-        Extract features only from the object region (inside/near mask)
-        
-        Args:
-            image: Input grayscale image
-            mask: Binary mask of object
-            
-        Returns:
-            Tuple of (keypoints, descriptors)
-        """
-        # Dilate mask to include surrounding area
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         dilated_mask = cv2.dilate(mask, kernel, iterations=1)
-        
-        # Detect features in dilated region
-        keypoints, descriptors = self.detect_and_compute(image, dilated_mask)
-        
+        keypoints, descriptors = self.detect_and_compute(image, dilated_mask, use_prev=True)
         return keypoints, descriptors
     
     def match_features(self, desc1: np.ndarray, 
                       desc2: np.ndarray) -> List[cv2.DMatch]:
-        """
-        Match features between two descriptor sets
-        
-        Args:
-            desc1: Descriptors from first image
-            desc2: Descriptors from second image
-            
-        Returns:
-            List of good matches after ratio test
-        """
         if desc1 is None or desc2 is None:
             return []
         
-        # KNN matching with k=2
-        matches = self.matcher.knnMatch(desc1, desc2, k=2)
+        match_pairs = []
         
-        # Apply Lowe's ratio test
+        # Loop through each descriptor in desc1 (reference/query image)
+        for ref_idx in range(len(desc1)):
+            # Find the closest and second closest distances to descriptors in desc2 (train image)
+            best_distance = float('inf')
+            best_test_idx = -1
+            second_best_distance = float('inf')
+            
+            for test_idx in range(len(desc2)):
+                # Calculate Euclidean distance between descriptors
+                distance = np.sqrt(np.sum((desc2[test_idx] - desc1[ref_idx]) ** 2))
+                
+                # Update best and second best distances
+                if distance < best_distance:
+                    second_best_distance = best_distance
+                    best_distance = distance
+                    best_test_idx = test_idx
+                elif distance < second_best_distance:
+                    second_best_distance = distance
+            
+            # Apply Lowe's ratio test
+            # Only keep match if best distance is significantly better than second best
+            if best_test_idx != -1 and second_best_distance > 0:
+                if best_distance / second_best_distance < self.match_ratio:
+                    match_pairs.append((best_distance, ref_idx, best_test_idx))
+        
+        # Ensure one-to-one matching: each descriptor in desc2 should match only once
+        unique_match_pairs = {}
+        for distance, ref_idx, test_idx in match_pairs:
+            # Store match pair if it's the first time we find this test keypoint
+            if test_idx not in unique_match_pairs:
+                unique_match_pairs[test_idx] = (distance, ref_idx, test_idx)
+            # If this test keypoint already has a match, keep the one with smaller distance
+            else:
+                if distance < unique_match_pairs[test_idx][0]:
+                    unique_match_pairs[test_idx] = (distance, ref_idx, test_idx)
+        
+        # Convert to cv2.DMatch objects for compatibility with OpenCV functions
         good_matches = []
-        for match_pair in matches:
-            if len(match_pair) == 2:
-                m, n = match_pair
-                if m.distance < self.match_ratio * n.distance:
-                    good_matches.append(m)
+        for distance, ref_idx, test_idx in unique_match_pairs.values():
+            dmatch = cv2.DMatch()
+            dmatch.queryIdx = ref_idx
+            dmatch.trainIdx = test_idx
+            dmatch.distance = distance
+            good_matches.append(dmatch)
+        
+        # Sort by distance (best matches first)
+        good_matches.sort(key=lambda x: x.distance)
         
         return good_matches
     
     def estimate_transform(self, kp1: List, kp2: List, 
-                          matches: List[cv2.DMatch]) -> Optional[np.ndarray]:
-        """
-        Estimate homography transformation between matched keypoints
-        
-        Args:
-            kp1: Keypoints from first image
-            kp2: Keypoints from second image
-            matches: List of good matches
-            
-        Returns:
-            3x3 homography matrix or None if estimation fails
-        """
+                          matches: List[cv2.DMatch]) -> Tuple[Optional[np.ndarray], List[int]]:
         if len(matches) < self.min_matches:
             print(f"Not enough matches: {len(matches)} < {self.min_matches}")
-            return None
+            return None, []
         
-        # Extract matched keypoint coordinates
-        pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-        pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+        # Number of RANSAC iterations
+        num_attempts = 100
         
-        # Estimate homography with RANSAC
-        H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 
-                                     self.ransac_threshold)
+        # Distance threshold for considering a match as inlier (in pixels)
+        inlier_threshold = 1.0
         
-        if H is None:
-            print("Homography estimation failed")
-            return None
+        # Number of points needed for transformation
+        # Affine needs 3 points, Homography needs 4 points
+        num_sample_points = 3
         
-        # Count inliers
-        inliers = np.sum(mask)
-        print(f"Homography estimated with {inliers}/{len(matches)} inliers")
+        if len(matches) < num_sample_points:
+            print(f"Not enough matches for transformation: {len(matches)} < {num_sample_points}")
+            return None, []
         
-        return H
+        best_matrix = None
+        best_inlier_count = 0
+        best_point_indices = []  # Store indices of the 3 or 4 points that form the best matrix
+        
+        # Convert matches to list of tuples for easier sampling
+        match_list = [(m.distance, m.queryIdx, m.trainIdx) for m in matches]
+        
+        for attempt in range(num_attempts):
+            # Randomly sample points for computing transformation
+            if len(match_list) == num_sample_points:
+                sample_indices = list(range(len(match_list)))
+            else:
+                sample_indices = random.sample(range(len(match_list)), num_sample_points)
+            
+            sample_matches = [match_list[i] for i in sample_indices]
+            
+            # Extract point coordinates for sampled matches
+            src_points = []
+            dst_points = []
+            for _, src_idx, dst_idx in sample_matches:
+                src_points.append(kp1[src_idx].pt)
+                dst_points.append(kp2[dst_idx].pt)
+            
+            src_points = np.array(src_points, dtype=np.float32)
+            dst_points = np.array(dst_points, dtype=np.float32)
+            
+            # Compute affine transformation (2x3 matrix)
+            M = cv2.getAffineTransform(src_points[:3], dst_points[:3])
+            
+            # Count inliers by testing transformation on all matches
+            inlier_count = 0
+            
+            for idx, (_, src_idx, dst_idx) in enumerate(match_list):
+                # Get source and destination points
+                src_pt = np.array(kp1[src_idx].pt, dtype=np.float32)
+                dst_pt = np.array(kp2[dst_idx].pt, dtype=np.float32)
+                
+                # For affine, use affine transformation
+                src_pt_h = np.append(src_pt, 1)  # Add homogeneous coordinate
+                pred_pt = M @ src_pt_h
+                
+                # Calculate reprojection error
+                distance = np.sqrt(np.sum((dst_pt - pred_pt) ** 2))
+                
+                # Check if this match is an inlier
+                if distance < inlier_threshold:
+                    inlier_count += 1
+            
+            # Update best transformation if this one has more inliers
+            if inlier_count > best_inlier_count:
+                best_inlier_count = inlier_count
+                best_matrix = M
+                best_point_indices = sample_indices  # Store the indices used for this matrix
+        
+        if best_matrix is None:
+            print("Transformation estimation failed - no valid matrix found")
+            return None, []
+        
+        print(f"Transformation estimated with {best_inlier_count}/{len(matches)} inliers "
+              f"({100*best_inlier_count/len(matches):.1f}%)")
+        
+        return best_matrix, best_point_indices
     
-    def warp_mask(self, mask: np.ndarray, H: np.ndarray, 
+    def warp_mask(self, mask: np.ndarray, M: np.ndarray, 
                   target_shape: Tuple[int, int]) -> np.ndarray:
-        """
-        Warp mask using homography transformation
         
-        Args:
-            mask: Binary mask to warp
-            H: 3x3 homography matrix
-            target_shape: (height, width) of target image
-            
-        Returns:
-            Warped mask
-        """
         height, width = target_shape
-        warped_mask = cv2.warpPerspective(mask, H, (width, height))
         
-        # Threshold to ensure binary mask
+        # Check if using homography (3x3) or affine (2x3)
+        if M.shape == (3, 3):
+            # Homography transformation (perspective warp)
+            warped_mask = cv2.warpPerspective(mask, M, (width, height))
+        elif M.shape == (2, 3):
+            # Affine transformation
+            warped_mask = cv2.warpAffine(mask, M, (width, height))
+        else:
+            raise ValueError(f"Invalid transformation matrix shape: {M.shape}. "
+                           f"Expected (2,3) for affine or (3,3) for homography")
+        
+        # Ensure binary mask (threshold at 127 to handle interpolation artifacts)
         _, warped_mask = cv2.threshold(warped_mask, 127, 255, cv2.THRESH_BINARY)
-        
         return warped_mask
-    
-    def refine_with_region_growing(self, image: np.ndarray, 
-                                   initial_mask: np.ndarray,
-                                   region_grower) -> np.ndarray:
-        """
-        Refine propagated mask using region growing
-        
-        Args:
-            image: Target image
-            initial_mask: Warped mask from previous frame
-            region_grower: RegionGrowing object from segmentation module
-            
-        Returns:
-            Refined mask
-        """
-        # Find seeds inside the initial mask (use mask center points)
-        contours, _ = cv2.findContours(initial_mask, cv2.RETR_EXTERNAL, 
-                                      cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return initial_mask
-        
-        # Get seeds from largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        M = cv2.moments(largest_contour)
-        
-        if M["m00"] == 0:
-            return initial_mask
-        
-        # Center of mass as seed
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-        
-        # Clear previous seeds and add new one
-        region_grower.clear_seeds()
-        region_grower.add_seed(cx, cy)
-        
-        # Perform region growing
-        refined_mask, _ = region_grower.segment(image, smooth=True)
-        
-        return refined_mask
     
     def propagate_annotation(self, prev_frame: np.ndarray, 
                            prev_mask: np.ndarray,
-                           next_frame: np.ndarray,
-                           refine: bool = True,
-                           region_grower=None) -> Tuple[np.ndarray, dict]:
-        """
-        Main function: Propagate annotation from one frame to next
-        
-        Args:
-            prev_frame: Previous frame (BGR or grayscale)
-            prev_mask: Binary mask from previous frame
-            next_frame: Next frame to propagate annotation to
-            refine: Whether to refine with region growing
-            region_grower: RegionGrowing object (required if refine=True)
-            
-        Returns:
-            Tuple of (propagated mask, metrics dict)
-        """
+                           next_frame: np.ndarray) -> Tuple[np.ndarray, dict]:
         metrics = {
             'matches': 0,
             'inliers': 0,
-            'transform_success': False,
-            'refinement_applied': False
+            'transform_success': False
         }
         
         # Convert to grayscale if needed
-        if len(prev_frame.shape) == 3:
-            prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-        else:
-            prev_gray = prev_frame
-            
-        if len(next_frame.shape) == 3:
-            next_gray = cv2.cvtColor(next_frame, cv2.COLOR_BGR2GRAY)
-        else:
-            next_gray = next_frame
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY) \
+                    if len(prev_frame.shape) == 3 else prev_frame
+        next_gray = cv2.cvtColor(next_frame, cv2.COLOR_BGR2GRAY) \
+                    if len(next_frame.shape) == 3 else next_frame
         
-        # Extract features from object region in previous frame
+        # Extract SIFT features
         kp1, desc1 = self.extract_object_features(prev_gray, prev_mask)
-        
-        # Extract features from entire next frame
-        kp2, desc2 = self.detect_and_compute(next_gray)
+        kp2, desc2 = self.detect_and_compute(next_gray, use_prev=False)
         
         if desc1 is None or desc2 is None:
             print("Feature extraction failed")
-            return np.zeros_like(prev_mask), metrics
+            # Return empty mask with correct shape
+            return np.zeros(next_gray.shape, dtype=np.uint8), metrics
         
         # Match features
         matches = self.match_features(desc1, desc2)
         metrics['matches'] = len(matches)
         
         # Estimate transformation
-        H = self.estimate_transform(kp1, kp2, matches)
+        M, best_point_indices = self.estimate_transform(kp1, kp2, matches)
         
-        if H is None:
-            print("Transform estimation failed, returning empty mask")
-            return np.zeros_like(prev_mask), metrics
+        if M is None:
+            print("Transform estimation failed")
+            # Return empty mask with correct shape
+            return np.zeros(next_gray.shape, dtype=np.uint8), metrics
         
         metrics['transform_success'] = True
+        metrics['best_point_indices'] = best_point_indices
         
-        # Warp mask to next frame
-        warped_mask = self.warp_mask(prev_mask, H, next_gray.shape)
-        
-        # Refine with region growing if requested
-        if refine and region_grower is not None:
-            warped_mask = self.refine_with_region_growing(next_frame, 
-                                                         warped_mask, 
-                                                         region_grower)
-            metrics['refinement_applied'] = True
-        
+        # Warp and return mask
+        warped_mask = self.warp_mask(prev_mask, M, next_gray.shape)
         return warped_mask, metrics
+    
+    def visualize_best_transformation_points(self, img1: np.ndarray, kp1: List,
+                                            img2: np.ndarray, kp2: List,
+                                            matches: List[cv2.DMatch],
+                                            best_point_indices: List[int]) -> np.ndarray:
+        if not best_point_indices:
+            print("No best point indices provided")
+            return np.hstack([img1, img2])
+        
+        # Get the matches that were used to create the best transformation
+        best_matches = [matches[i] for i in best_point_indices]
+        
+        # Draw matches with thick lines and large circles
+        match_img = cv2.drawMatches(
+            img1, kp1, img2, kp2, best_matches, None,
+            matchColor=(0, 255, 0),  # Green lines
+            singlePointColor=(255, 0, 0),  # Blue points
+            matchesMask=None,
+            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+        )
+        
+        # Add numbers to each keypoint pair
+        for idx, match_idx in enumerate(best_point_indices):
+            match = matches[match_idx]
+            
+            # Get keypoint coordinates
+            pt1 = tuple(map(int, kp1[match.queryIdx].pt))
+            pt2 = tuple(map(int, kp2[match.trainIdx].pt))
+            pt2_shifted = (pt2[0] + img1.shape[1], pt2[1])  # Shift for concatenated image
+            
+            # Draw larger circles around the keypoints
+            cv2.circle(match_img, pt1, 15, (0, 255, 255), 3)  # Yellow circle on source
+            cv2.circle(match_img, pt2_shifted, 15, (0, 255, 255), 3)  # Yellow circle on target
+            
+            # Add number labels
+            cv2.putText(match_img, str(idx + 1), 
+                       (pt1[0] - 10, pt1[1] - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+            cv2.putText(match_img, str(idx + 1), 
+                       (pt2_shifted[0] - 10, pt2_shifted[1] - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+        
+        # Add title
+        num_points = len(best_point_indices)
+        transform_type = "Homography" if num_points == 4 else "Affine"
+        title = f"Best {num_points} Points for {transform_type} Transformation Matrix"
+        cv2.putText(match_img, title, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        
+        return match_img
+    
+    def visualize_keypoints(self, image: np.ndarray, 
+                          keypoints: List,
+                          title: str = "Keypoints") -> np.ndarray:
+        """Visualize SIFT keypoints on an image"""
+        img_with_kp = cv2.drawKeypoints(
+            image, keypoints, None,
+            flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+        )
+        
+        # Add keypoint count text
+        cv2.putText(img_with_kp, f"Keypoints: {len(keypoints)}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        return img_with_kp
     
     def visualize_matches(self, img1: np.ndarray, kp1: List,
                          img2: np.ndarray, kp2: List,
-                         matches: List[cv2.DMatch]) -> np.ndarray:
-        """
-        Visualize feature matches between two images
+                         matches: List[cv2.DMatch],
+                         max_matches: int = 50) -> np.ndarray:
+        """Visualize feature matches between two images"""
+        top_matches = sorted(matches, key=lambda x: x.distance)[:max_matches]
+        match_img = cv2.drawMatches(
+            img1, kp1, img2, kp2, top_matches, None,
+            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+        )
         
-        Args:
-            img1: First image
-            kp1: Keypoints from first image
-            img2: Second image
-            kp2: Keypoints from second image
-            matches: List of matches
-            
-        Returns:
-            Visualization image
-        """
-        # Draw only top N matches for clarity
-        top_matches = sorted(matches, key=lambda x: x.distance)[:50]
-        
-        match_img = cv2.drawMatches(img1, kp1, img2, kp2, top_matches, None,
-                                   flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+        # Add match statistics
+        cv2.putText(match_img, f"Matches: {len(matches)} (showing top {len(top_matches)})", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        if top_matches:
+            avg_dist = np.mean([m.distance for m in top_matches])
+            cv2.putText(match_img, f"Avg distance: {avg_dist:.2f}", 
+                       (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
         return match_img
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    print("AnnotationPropagator module loaded successfully!")
-    print(f"Recommended defaults:")
-    print(f"  Feature type: {AnnotationPropagator.DEFAULT_FEATURE_TYPE}")
-    print(f"  Match ratio: {AnnotationPropagator.DEFAULT_MATCH_RATIO}")
-    print(f"  RANSAC threshold: {AnnotationPropagator.DEFAULT_RANSAC_THRESHOLD}")
-    print(f"  Minimum matches: {AnnotationPropagator.DEFAULT_MIN_MATCHES}")
     
-    # Example usage:
-    # propagator = AnnotationPropagator(feature_type='ORB')
-    # next_mask, metrics = propagator.propagate_annotation(
-    #     prev_frame, prev_mask, next_frame, 
-    #     refine=True, region_grower=rg
-    # )
+    def visualize_propagation_pipeline(self, prev_frame: np.ndarray,
+                                      prev_mask: np.ndarray,
+                                      next_frame: np.ndarray,
+                                      save_dir: str = ".") -> dict:
+        """Run propagation and generate visualization images for each step"""
+        import os
+        
+        results = {}
+        
+        # Convert to grayscale
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY) \
+                    if len(prev_frame.shape) == 3 else prev_frame
+        next_gray = cv2.cvtColor(next_frame, cv2.COLOR_BGR2GRAY) \
+                    if len(next_frame.shape) == 3 else next_frame
+        
+        # Step 1: Extract features from masked region
+        kp1, desc1 = self.extract_object_features(prev_gray, prev_mask)
+        kp2, desc2 = self.detect_and_compute(next_gray)
+        
+        # Visualize keypoints on first image (masked region only)
+        kp1_vis = self.visualize_keypoints(prev_frame.copy(), kp1, "Source Keypoints")
+        kp1_path = os.path.join(save_dir, "01_keypoints_source.png")
+        cv2.imwrite(kp1_path, kp1_vis)
+        results['keypoints_source'] = kp1_path
+        print(f"Saved: {kp1_path}")
+        
+        # Visualize keypoints on second image
+        kp2_vis = self.visualize_keypoints(next_frame.copy(), kp2, "Target Keypoints")
+        kp2_path = os.path.join(save_dir, "02_keypoints_target.png")
+        cv2.imwrite(kp2_path, kp2_vis)
+        results['keypoints_target'] = kp2_path
+        print(f"Saved: {kp2_path}")
+        
+        if desc1 is None or desc2 is None:
+            print("Feature extraction failed")
+            return results
+        
+        # Step 2: Match features
+        matches = self.match_features(desc1, desc2)
+        
+        # Visualize matches
+        if len(matches) > 0:
+            match_vis = self.visualize_matches(prev_frame, kp1, next_frame, kp2, matches)
+            match_path = os.path.join(save_dir, "03_feature_matches.png")
+            cv2.imwrite(match_path, match_vis)
+            results['matches'] = match_path
+            print(f"Saved: {match_path}")
+        
+        # Step 3: Estimate transformation and propagate
+        propagated_mask, metrics = self.propagate_annotation(
+            prev_frame, prev_mask, next_frame
+        )
+        
+        # Visualize best transformation points if available
+        if metrics.get('best_point_indices'):
+            best_points_vis = self.visualize_best_transformation_points(
+                prev_frame, kp1, next_frame, kp2, matches, 
+                metrics['best_point_indices']
+            )
+            best_points_path = os.path.join(save_dir, "03b_best_transformation_points.png")
+            cv2.imwrite(best_points_path, best_points_vis)
+            results['best_points'] = best_points_path
+            print(f"Saved: {best_points_path}")
+        
+        # Visualize propagated mask
+        overlay = next_frame.copy()
+        overlay[propagated_mask > 0] = [0, 255, 0]
+        result = cv2.addWeighted(next_frame, 0.7, overlay, 0.3, 0)
+        
+        cv2.putText(result, f"Matches: {metrics['matches']}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(result, f"Success: {metrics['transform_success']}", (10, 70),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        result_path = os.path.join(save_dir, "04_propagated_result.png")
+        cv2.imwrite(result_path, result)
+        results['result'] = result_path
+        print(f"Saved: {result_path}")
+        
+        # Save mask separately
+        mask_path = os.path.join(save_dir, "05_propagated_mask.png")
+        cv2.imwrite(mask_path, propagated_mask)
+        results['mask'] = mask_path
+        print(f"Saved: {mask_path}")
+        
+        results['metrics'] = metrics
+        return results
+
+
