@@ -13,7 +13,7 @@ class EdgeDetector:
     
     # Recommended default parameters
     DEFAULT_GAUSSIAN_SIGMA = 1.5
-    DEFAULT_CANNY_LOW = 30
+    DEFAULT_CANNY_LOW = 10
     DEFAULT_CANNY_HIGH = 100
     DEFAULT_SOBEL_KERNEL = 3
     DEFAULT_ITERATIONS = 2
@@ -244,20 +244,74 @@ class EdgeDetector:
 
 # Example usage and testing
 if __name__ == "__main__":
-    # Test the module
+    # CLI: process an image or folder directly
+    import argparse
+    import glob
+    import os
+
+    def _process_and_save(detector: EdgeDetector, path: str, out_dir: str, method: str, cleanup: str) -> bool:
+        img = detector.load_image(path)
+        if img is None:
+            print(f"Skipping (can't read): {path}")
+            return False
+
+        edges = detector.get_clean_edges(img, method=method, cleanup_method=cleanup)
+
+        # Ensure output dir exists
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Make both arrays 3-channel so we can stack them for visualization
+        gray = detector.to_grayscale(img)
+        left = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) if len(gray.shape) == 2 else gray
+        right = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR) if len(edges.shape) == 2 else edges
+        combined = np.hstack([left, right])
+
+        base = os.path.splitext(os.path.basename(path))[0]
+        out_file = os.path.join(out_dir, f"{base}_{method}_{cleanup}.png")
+        ok = cv2.imwrite(out_file, combined)
+        if ok:
+            print(f"Saved: {out_file}")
+        else:
+            print(f"Failed to write: {out_file}")
+
+        return ok
+
+    parser = argparse.ArgumentParser(description="EdgeDetector demo - process image(s) and save visual outputs")
+    parser.add_argument("-i", "--image", help="Path to single image to process")
+    parser.add_argument("-d", "--dir", help="Directory to process recursively (jpg/png)")
+    parser.add_argument("-m", "--method", choices=("canny", "sobel", "iterative"), default="iterative")
+    parser.add_argument("-c", "--cleanup", choices=("morphological", "neighborhood", "none"), default="morphological")
+    parser.add_argument("-o", "--out", default=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'output')),
+                        help="Output directory to save visualizations")
+    parser.add_argument("--default-sample", action="store_true", help="Use a default sample from tests/test_images/BREAD_KNIFE")
+
+    args = parser.parse_args()
+
     detector = EdgeDetector()
-    
-    # Example: Load and process an image
-    # image = detector.load_image("path/to/image.jpg")
-    # if image is not None:
-    #     edges = detector.get_clean_edges(image, method='iterative')
-    #     cv2.imshow("Original", image)
-    #     cv2.imshow("Edges", edges)
-    #     cv2.waitKey(0)
-    #     cv2.destroyAllWindows()
-    
-    print("EdgeDetector module loaded successfully!")
-    print(f"Recommended defaults:")
-    print(f"  Gaussian sigma: {EdgeDetector.DEFAULT_GAUSSIAN_SIGMA}")
-    print(f"  Canny thresholds: ({EdgeDetector.DEFAULT_CANNY_LOW}, {EdgeDetector.DEFAULT_CANNY_HIGH})")
-    print(f"  Iterations: {EdgeDetector.DEFAULT_ITERATIONS}")
+    processed = 0
+
+    if args.default_sample and not args.image and not args.dir:
+        proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        sample_dir = os.path.join(proj_root, 'tests', 'test_images', 'BREAD_KNIFE')
+        candidates = glob.glob(os.path.join(sample_dir, '*.jpg')) + glob.glob(os.path.join(sample_dir, '*.JPG'))
+        if not candidates:
+            print('No sample images found in', sample_dir)
+        else:
+            if _process_and_save(detector, candidates[0], args.out, args.method, args.cleanup):
+                processed += 1
+
+    if args.image:
+        if _process_and_save(detector, args.image, args.out, args.method, args.cleanup):
+            processed += 1
+
+    if args.dir:
+        for ext in ('*.jpg', '*.JPG', '*.png', '*.PNG'):
+            for path in glob.glob(os.path.join(args.dir, '**', ext), recursive=True):
+                if _process_and_save(detector, path, args.out, args.method, args.cleanup):
+                    processed += 1
+
+    if processed == 0:
+        print('\nNo images processed. Examples:')
+        print('  python modules/preprocessing.py --default-sample')
+        print('  python modules/preprocessing.py -i tests/test_images/BREAD_KNIFE/breadkniferaw1.jpg')
+        print('  python modules/preprocessing.py -d tests/test_images/BREAD_KNIFE -m canny -c neighborhood')
