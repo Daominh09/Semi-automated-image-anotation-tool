@@ -13,8 +13,8 @@ class EdgeDetector:
     
     # Recommended default parameters
     DEFAULT_GAUSSIAN_SIGMA = 1.5
-    DEFAULT_CANNY_LOW = 50
-    DEFAULT_CANNY_HIGH = 150
+    DEFAULT_CANNY_LOW = 30
+    DEFAULT_CANNY_HIGH = 100
     DEFAULT_SOBEL_KERNEL = 3
     DEFAULT_ITERATIONS = 2
     
