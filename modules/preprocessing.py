@@ -5,7 +5,7 @@ Responsible for image loading, smoothing, and edge detection
 
 import cv2
 import numpy as np
-from typing import Tuple, Optional
+from typing import Optional
 
 
 class EdgeDetector:
@@ -28,15 +28,6 @@ class EdgeDetector:
     
     @staticmethod
     def load_image(image_path: str) -> Optional[np.ndarray]:
-        """
-        Load an image from file path
-        
-        Args:
-            image_path: Path to image file
-            
-        Returns:
-            BGR image as numpy array, or None if loading fails
-        """
         image = cv2.imread(image_path)
         if image is None:
             print(f"Error: Could not load image from {image_path}")
@@ -44,30 +35,11 @@ class EdgeDetector:
     
     @staticmethod
     def to_grayscale(image: np.ndarray) -> np.ndarray:
-        """
-        Convert BGR image to grayscale
-        
-        Args:
-            image: BGR image
-            
-        Returns:
-            Grayscale image
-        """
         if len(image.shape) == 3:
             return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         return image
     
     def apply_gaussian_smoothing(self, image: np.ndarray, sigma: Optional[float] = None) -> np.ndarray:
-        """
-        Apply Gaussian smoothing to reduce noise
-        
-        Args:
-            image: Input grayscale image
-            sigma: Standard deviation for Gaussian kernel (uses default if None)
-            
-        Returns:
-            Smoothed image
-        """
         if sigma is None:
             sigma = self.gaussian_sigma
         
@@ -78,20 +50,8 @@ class EdgeDetector:
         
         return cv2.GaussianBlur(image, (kernel_size, kernel_size), sigma)
     
-    def canny_edge_detection(self, image: np.ndarray, 
-                            low_threshold: Optional[int] = None,
-                            high_threshold: Optional[int] = None) -> np.ndarray:
-        """
-        Apply Canny edge detection
-        
-        Args:
-            image: Input grayscale image
-            low_threshold: Lower threshold for hysteresis (uses default if None)
-            high_threshold: Upper threshold for hysteresis (uses default if None)
-            
-        Returns:
-            Binary edge map
-        """
+    def canny_edge_detection(self, image: np.ndarray, low_threshold: Optional[int] = None, high_threshold: Optional[int] = None) -> np.ndarray:
+
         if low_threshold is None:
             low_threshold = self.canny_low
         if high_threshold is None:
@@ -99,18 +59,19 @@ class EdgeDetector:
         
         return cv2.Canny(image, low_threshold, high_threshold)
     
-    def sobel_edge_detection(self, image: np.ndarray, 
-                            kernel_size: Optional[int] = None) -> np.ndarray:
-        """
-        Apply Sobel edge detection
-        
-        Args:
-            image: Input grayscale image
-            kernel_size: Sobel kernel size (uses default if None)
-            
-        Returns:
-            Edge magnitude map (0-255)
-        """
+    def morphological_gradient(self, image: np.ndarray, kernel_size: int = 3) -> np.ndarray:
+
+        kernel = np.ones((kernel_size,kernel_size), np.uint8)
+        dilated = cv2.dilate(image, kernel, iterations=1)
+        eroded = cv2.erode(image, kernel, iterations=1)
+
+        morph_gradient = cv2.absdiff(dilated, eroded)
+
+        _, edge_map = cv2.threshold(morph_gradient, 40, 255, cv2.THRESH_BINARY)
+        return edge_map
+
+    def sobel_edge_detection(self, image: np.ndarray, kernel_size: Optional[int] = None) -> np.ndarray:
+
         if kernel_size is None:
             kernel_size = self.sobel_kernel
         
@@ -127,76 +88,42 @@ class EdgeDetector:
         return magnitude
     
     def iterative_canny(self, image: np.ndarray, iterations: Optional[int] = None) -> np.ndarray:
-        """
-        Apply iterative smoothing + Canny for better edge detection
-        
-        Args:
-            image: Input grayscale image
-            iterations: Number of smoothing iterations (uses default if None)
-            
-        Returns:
-            Combined edge map from all iterations
-        """
+    
         if iterations is None:
             iterations = self.iterations
         
         combined_edges = np.zeros_like(image, dtype=np.uint8)
         
         for i in range(iterations):
-            # Increase smoothing with each iteration
+         
             sigma = self.gaussian_sigma * (i + 1)
             smoothed = self.apply_gaussian_smoothing(image, sigma)
             edges = self.canny_edge_detection(smoothed)
             
-            # Combine edges (OR operation)
             combined_edges = cv2.bitwise_or(combined_edges, edges)
         
         return combined_edges
     
-    def morphological_closing(self, edge_map: np.ndarray, kernel_size: int = 3) -> np.ndarray:
-        """
-        Apply morphological closing to fill gaps in edges
-        
-        Args:
-            edge_map: Binary edge map
-            kernel_size: Size of structuring element
-            
-        Returns:
-            Cleaned edge map
-        """
+    def morphological_closing_cleanup(self, edge_map: np.ndarray, kernel_size: int = 3) -> np.ndarray:
+
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
         return cv2.morphologyEx(edge_map, cv2.MORPH_CLOSE, kernel)
     
-    def neighborhood_cleanup(self, edge_map: np.ndarray, threshold: int = 4) -> np.ndarray:
-        """
-        Clean edge map using neighborhood rule (majority voting)
-        
-        Args:
-            edge_map: Binary edge map
-            threshold: Minimum number of edge neighbors to keep pixel (out of 8)
-            
-        Returns:
-            Cleaned edge map
-        """
-        # Pad the image to handle borders
-        padded = np.pad(edge_map, 1, mode='constant', constant_values=0)
-        cleaned = np.zeros_like(edge_map)
-        
-        for i in range(1, padded.shape[0] - 1):
-            for j in range(1, padded.shape[1] - 1):
-                # Count edge neighbors (8-connectivity)
-                neighborhood = padded[i-1:i+2, j-1:j+2]
-                neighbor_sum = np.sum(neighborhood > 0) - (padded[i, j] > 0)
-                
-                # Keep pixel if it has enough edge neighbors
-                if neighbor_sum >= threshold:
-                    cleaned[i-1, j-1] = 255
-        
+    def neighborhood_cleanup(self, edge_map: np.ndarray, threshold: int = 2) -> np.ndarray:
+
+        binary_map = (edge_map > 0).astype(np.uint8)
+
+        kernel = np.array([[1, 1, 1],
+                        [1, 0, 1],
+                        [1, 1, 1]], dtype=np.uint8)
+
+        neighbor_counts = cv2.filter2D(binary_map, -1, kernel)
+
+        cleaned = np.where(neighbor_counts >= threshold, 255, 0).astype(np.uint8)
+
         return cleaned
     
-    def get_clean_edges(self, image: np.ndarray, 
-                       method: str = 'canny',
-                       cleanup_method: str = 'morphological') -> np.ndarray:
+    def get_clean_edges(self, image: np.ndarray, method: str = 'canny', cleanup_method: str = 'morphological') -> np.ndarray:
         """
         Main function: Get clean edge map from input image
         
@@ -224,16 +151,17 @@ class EdgeDetector:
             edges = self.canny_edge_detection(smoothed)
         elif method == 'sobel':
             sobel_edges = self.sobel_edge_detection(smoothed)
-            # Threshold Sobel result
             _, edges = cv2.threshold(sobel_edges, 100, 255, cv2.THRESH_BINARY)
         elif method == 'iterative':
             edges = self.iterative_canny(gray)
+        elif method == 'morphological':
+            edges = self.morphological_gradient(smoothed)
         else:
             raise ValueError(f"Unknown method: {method}")
         
         # Cleanup
         if cleanup_method == 'morphological':
-            cleaned = self.morphological_closing(edges)
+            cleaned = self.morphological_closing_cleanup(edges)
         elif cleanup_method == 'neighborhood':
             cleaned = self.neighborhood_cleanup(edges)
         else:
@@ -279,7 +207,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EdgeDetector demo - process image(s) and save visual outputs")
     parser.add_argument("-i", "--image", help="Path to single image to process")
     parser.add_argument("-d", "--dir", help="Directory to process recursively (jpg/png)")
-    parser.add_argument("-m", "--method", choices=("canny", "sobel", "iterative"), default="iterative")
+    parser.add_argument("-m", "--method", choices=("canny", "sobel", "iterative", "morphological"), default="iterative")
     parser.add_argument("-c", "--cleanup", choices=("morphological", "neighborhood", "none"), default="morphological")
     parser.add_argument("-o", "--out", default=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'output')),
                         help="Output directory to save visualizations")
