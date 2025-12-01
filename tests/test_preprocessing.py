@@ -1,8 +1,3 @@
-"""
-Test script for Person A - Edge Detection Module
-Simplified version for reference images only
-"""
-
 import cv2
 import numpy as np
 import sys, os

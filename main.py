@@ -1,8 +1,3 @@
-"""
-PyQt5 GUI for Edge Detection and Object Segmentation
-Integrates EdgeDetector, RegionGrowing, and AnnotationPropagator
-"""
-
 import sys
 import cv2
 import numpy as np

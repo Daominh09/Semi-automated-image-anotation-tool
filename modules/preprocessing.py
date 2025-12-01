@@ -1,8 +1,3 @@
-"""
-Person A: Edge Detection & Preprocessing Module
-Responsible for image loading, smoothing, and edge detection
-"""
-
 import cv2
 import numpy as np
 from typing import Tuple, Optional
