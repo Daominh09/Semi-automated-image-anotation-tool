@@ -1,7 +1,8 @@
 import cv2
 import numpy as np
 import random
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
+from collections import deque
 
 
 class AnnotationPropagator:
@@ -11,15 +12,22 @@ class AnnotationPropagator:
     DEFAULT_MATCH_RATIO = 0.85
     DEFAULT_RANSAC_THRESHOLD = 5.0
     DEFAULT_MIN_MATCHES = 3
+    DEFAULT_NUM_CANDIDATES = 5
     
     def __init__(self,
                 prev_sift_params=None,
-                next_sift_params=None):
+                next_sift_params=None,
+                num_candidates=None,
+                segmentation_method='watershed',
+                min_segment_overlap=5,
+                normalize_for_validation=True,
+                validation_target_size=640,
+                **kwargs):
 
         # Default SIFT params if none provided
-        default_prev = dict(nfeatures=10000, contrastThreshold=0.03,
+        default_prev = dict(nfeatures=10000, contrastThreshold=0.08,
                             edgeThreshold=10)
-        default_next = dict(nfeatures=10000, contrastThreshold=0.03,
+        default_next = dict(nfeatures=10000, contrastThreshold=0.08,
                             edgeThreshold=10)
 
         prev_sift_params = prev_sift_params or default_prev
@@ -32,6 +40,16 @@ class AnnotationPropagator:
         # Other parameters
         self.match_ratio = self.DEFAULT_MATCH_RATIO
         self.min_matches = self.DEFAULT_MIN_MATCHES
+        self.num_candidates = num_candidates or self.DEFAULT_NUM_CANDIDATES
+        
+        # Validation parameters (Person D's work)
+        self.segmentation_method = segmentation_method
+        self.min_segment_overlap = min_segment_overlap
+        self.normalize_for_validation = normalize_for_validation
+        self.validation_target_size = validation_target_size
+        
+        # Cache for segmentations
+        self._segment_cache = {}
 
     
     def detect_and_compute(self, image, mask=None, use_prev=False):
@@ -74,23 +92,20 @@ class AnnotationPropagator:
                     second_best_distance = distance
             
             # Apply Lowe's ratio test
-            # Only keep match if best distance is significantly better than second best
             if best_test_idx != -1 and second_best_distance > 0:
                 if best_distance / second_best_distance < self.match_ratio:
                     match_pairs.append((best_distance, ref_idx, best_test_idx))
         
-        # Ensure one-to-one matching: each descriptor in desc2 should match only once
+        # Ensure one-to-one matching
         unique_match_pairs = {}
         for distance, ref_idx, test_idx in match_pairs:
-            # Store match pair if it's the first time we find this test keypoint
             if test_idx not in unique_match_pairs:
                 unique_match_pairs[test_idx] = (distance, ref_idx, test_idx)
-            # If this test keypoint already has a match, keep the one with smaller distance
             else:
                 if distance < unique_match_pairs[test_idx][0]:
                     unique_match_pairs[test_idx] = (distance, ref_idx, test_idx)
         
-        # Convert to cv2.DMatch objects for compatibility with OpenCV functions
+        # Convert to cv2.DMatch objects
         good_matches = []
         for distance, ref_idx, test_idx in unique_match_pairs.values():
             dmatch = cv2.DMatch()
@@ -99,119 +114,288 @@ class AnnotationPropagator:
             dmatch.distance = distance
             good_matches.append(dmatch)
         
-        # Sort by distance (best matches first)
         good_matches.sort(key=lambda x: x.distance)
         
         return good_matches
     
-    def estimate_transform(self, kp1: List, kp2: List, 
-                          matches: List[cv2.DMatch]) -> Tuple[Optional[np.ndarray], List[int]]:
+    def estimate_transform_candidates(self, kp1: List, kp2: List, 
+                                     matches: List[cv2.DMatch],
+                                     num_candidates: int = None) -> List[Tuple[np.ndarray, List[int], int]]:
+        """Generate multiple transformation candidates using RANSAC"""
+        if num_candidates is None:
+            num_candidates = self.num_candidates
+            
         if len(matches) < self.min_matches:
             print(f"Not enough matches: {len(matches)} < {self.min_matches}")
-            return None, []
+            return []
         
-        # Number of RANSAC iterations
-        num_attempts = 100
-        
-        # Distance threshold for considering a match as inlier (in pixels)
+        num_attempts_per_candidate = 100
         inlier_threshold = 1.0
-        
-        # Number of points needed for transformation
         num_sample_points = 3
         
         if len(matches) < num_sample_points:
             print(f"Not enough matches for transformation: {len(matches)} < {num_sample_points}")
-            return None, []
+            return []
         
-        best_matrix = None
-        best_inlier_count = 0
-        best_point_indices = []  
-        
-        # Convert matches to list of tuples for easier sampling
+        candidates = []
         match_list = [(m.distance, m.queryIdx, m.trainIdx) for m in matches]
         
-        for attempt in range(num_attempts):
-            # Randomly sample points for computing transformation
-            if len(match_list) == num_sample_points:
-                sample_indices = list(range(len(match_list)))
-            else:
-                sample_indices = random.sample(range(len(match_list)), num_sample_points)
+        # Generate multiple candidates
+        for candidate_idx in range(num_candidates):
+            best_matrix = None
+            best_inlier_count = 0
+            best_point_indices = []
             
-            sample_matches = [match_list[i] for i in sample_indices]
-            
-            # Extract point coordinates for sampled matches
-            src_points = []
-            dst_points = []
-            for _, src_idx, dst_idx in sample_matches:
-                src_points.append(kp1[src_idx].pt)
-                dst_points.append(kp2[dst_idx].pt)
-            
-            src_points = np.array(src_points, dtype=np.float32)
-            dst_points = np.array(dst_points, dtype=np.float32)
-            
-            # Compute affine transformation (2x3 matrix)
-            M = cv2.getAffineTransform(src_points[:3], dst_points[:3])
-            
-            # Count inliers by testing transformation on all matches
-            inlier_count = 0
-            
-            for idx, (_, src_idx, dst_idx) in enumerate(match_list):
-                # Get source and destination points
-                src_pt = np.array(kp1[src_idx].pt, dtype=np.float32)
-                dst_pt = np.array(kp2[dst_idx].pt, dtype=np.float32)
+            for attempt in range(num_attempts_per_candidate):
+                if len(match_list) == num_sample_points:
+                    sample_indices = list(range(len(match_list)))
+                else:
+                    sample_indices = random.sample(range(len(match_list)), num_sample_points)
                 
-                # For affine, use affine transformation
-                src_pt_h = np.append(src_pt, 1)  # Add homogeneous coordinate
-                pred_pt = M @ src_pt_h
+                sample_matches = [match_list[i] for i in sample_indices]
                 
-                # Calculate reprojection error
-                distance = np.sqrt(np.sum((dst_pt - pred_pt) ** 2))
+                src_points = []
+                dst_points = []
+                for _, src_idx, dst_idx in sample_matches:
+                    src_points.append(kp1[src_idx].pt)
+                    dst_points.append(kp2[dst_idx].pt)
                 
-                # Check if this match is an inlier
-                if distance < inlier_threshold:
-                    inlier_count += 1
+                src_points = np.array(src_points, dtype=np.float32)
+                dst_points = np.array(dst_points, dtype=np.float32)
+                
+                M = cv2.getAffineTransform(src_points[:3], dst_points[:3])
+                
+                inlier_count = 0
+                for idx, (_, src_idx, dst_idx) in enumerate(match_list):
+                    src_pt = np.array(kp1[src_idx].pt, dtype=np.float32)
+                    dst_pt = np.array(kp2[dst_idx].pt, dtype=np.float32)
+                    
+                    src_pt_h = np.append(src_pt, 1)
+                    pred_pt = M @ src_pt_h
+                    
+                    distance = np.sqrt(np.sum((dst_pt - pred_pt) ** 2))
+                    
+                    if distance < inlier_threshold:
+                        inlier_count += 1
+                
+                if inlier_count > best_inlier_count:
+                    best_inlier_count = inlier_count
+                    best_matrix = M
+                    best_point_indices = sample_indices
             
-            # Update best transformation if this one has more inliers
-            if inlier_count > best_inlier_count:
-                best_inlier_count = inlier_count
-                best_matrix = M
-                best_point_indices = sample_indices  # Store the indices used for this matrix
+            if best_matrix is not None:
+                candidates.append((best_matrix, best_point_indices, best_inlier_count))
         
-        if best_matrix is None:
-            print("Transformation estimation failed - no valid matrix found")
-            return None, []
+        candidates.sort(key=lambda x: x[2], reverse=True)
         
-        print(f"Transformation estimated with {best_inlier_count}/{len(matches)} inliers "
-              f"({100*best_inlier_count/len(matches):.1f}%)")
+        print(f"Generated {len(candidates)} transformation candidates")
+        if candidates:
+            print(f"Best candidate has {candidates[0][2]}/{len(matches)} inliers "
+                  f"({100*candidates[0][2]/len(matches):.1f}%)")
         
-        return best_matrix, best_point_indices
+        return candidates
+    
+    # ========== PERSON D'S VALIDATION CODE STARTS HERE ==========
+    
+    def _normalize_for_segmentation(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
+        """Normalize image for consistent segmentation"""
+        if not self.normalize_for_validation:
+            return image, 1.0
+        
+        h, w = image.shape[:2]
+        max_dim = max(h, w)
+        
+        if max_dim <= self.validation_target_size:
+            return image, 1.0
+        
+        scale = self.validation_target_size / max_dim
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        normalized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return normalized, scale
+    
+    def _denormalize_segments(self, labels: np.ndarray, 
+                             original_shape: Tuple[int, int]) -> np.ndarray:
+        """Scale segment labels back to original size"""
+        h, w = original_shape[:2]
+        return cv2.resize(labels.astype(np.float32), (w, h), 
+                         interpolation=cv2.INTER_NEAREST).astype(np.int32)
+    
+    def segment_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Segment image into regions for validation
+        Person D's segmentation implementation
+        """
+        original_shape = image.shape
+        
+        # Normalize for consistent segmentation
+        norm_image, scale = self._normalize_for_segmentation(image)
+        
+        if len(norm_image.shape) == 3:
+            gray = cv2.cvtColor(norm_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = norm_image
+        
+        # Segment based on method
+        if self.segmentation_method == 'watershed':
+            labels = self._watershed_segmentation(norm_image, gray)
+        elif self.segmentation_method == 'slic':
+            labels = self._slic_segmentation(norm_image)
+        elif self.segmentation_method == 'grid':
+            labels = self._grid_segmentation(gray)
+        else:
+            raise ValueError(f"Unknown segmentation method: {self.segmentation_method}")
+        
+        # Denormalize back to original size
+        if scale != 1.0:
+            labels = self._denormalize_segments(labels, original_shape)
+        
+        return labels
+    
+    def _watershed_segmentation(self, image: np.ndarray, gray: np.ndarray) -> np.ndarray:
+        """Watershed segmentation"""
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+        
+        sure_bg = cv2.dilate(opening, kernel, iterations=3)
+        
+        dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+        _, sure_fg = cv2.threshold(dist_transform, 0.3 * dist_transform.max(), 255, 0)
+        
+        sure_fg = np.uint8(sure_fg)
+        unknown = cv2.subtract(sure_bg, sure_fg)
+        
+        _, markers = cv2.connectedComponents(sure_fg)
+        markers = markers + 1
+        markers[unknown == 255] = 0
+        
+        if len(image.shape) == 3:
+            markers = cv2.watershed(image, markers)
+        else:
+            img_color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            markers = cv2.watershed(img_color, markers)
+        
+        markers[markers == -1] = 0
+        
+        return markers.astype(np.int32)
+    
+    def _slic_segmentation(self, image: np.ndarray) -> np.ndarray:
+        """SLIC superpixel segmentation"""
+        try:
+            slic = cv2.ximgproc.createSuperpixelSLIC(image, region_size=20, ruler=10.0)
+            slic.iterate(10)
+            labels = slic.getLabels()
+            return labels
+        except:
+            print("SLIC not available, falling back to watershed")
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+            return self._watershed_segmentation(image, gray)
+    
+    def _grid_segmentation(self, gray: np.ndarray) -> np.ndarray:
+        """Simple grid-based segmentation (fallback)"""
+        h, w = gray.shape
+        segment_size = 20
+        labels = np.zeros((h, w), dtype=np.int32)
+        
+        segment_id = 1
+        for i in range(0, h, segment_size):
+            for j in range(0, w, segment_size):
+                labels[i:i+segment_size, j:j+segment_size] = segment_id
+                segment_id += 1
+        
+        return labels
+    
+    def evaluate_candidate(self, warped_mask: np.ndarray,
+                          target_segments: np.ndarray) -> Dict[str, float]:
+        """
+        Evaluate a single transformation candidate
+        Person D's scoring implementation
+        """
+        warped_area = np.sum(warped_mask > 0)
+        
+        if warped_area == 0:
+            return {
+                'score': float('inf'),
+                'symmetric_diff': float('inf'),
+                'false_positives': float('inf'),
+                'false_negatives': float('inf'),
+                'num_segments': 0
+            }
+        
+        # Find overlapping segments
+        overlapping_segments = np.unique(target_segments[warped_mask > 0])
+        overlapping_segments = overlapping_segments[overlapping_segments > 0]
+        
+        if len(overlapping_segments) == 0:
+            return {
+                'score': float('inf'),
+                'symmetric_diff': float('inf'),
+                'false_positives': float('inf'),
+                'false_negatives': float('inf'),
+                'num_segments': 0
+            }
+        
+        # Create mask2 by unioning overlapping segments
+        mask2 = np.zeros_like(warped_mask, dtype=np.uint8)
+        
+        for seg_id in overlapping_segments:
+            overlap_count = np.sum((target_segments == seg_id) & (warped_mask > 0))
+            
+            if overlap_count >= self.min_segment_overlap:
+                mask2[target_segments == seg_id] = 255
+        
+        # Calculate symmetric difference
+        false_positives = np.sum((mask2 > 0) & (warped_mask == 0))
+        false_negatives = np.sum((warped_mask > 0) & (mask2 == 0))
+        symmetric_diff = false_positives + false_negatives
+        
+        # Scale-invariant score
+        score = symmetric_diff / warped_area
+        
+        return {
+            'score': float(score),
+            'symmetric_diff': int(symmetric_diff),
+            'false_positives': int(false_positives),
+            'false_negatives': int(false_negatives),
+            'num_segments': int(len(overlapping_segments))
+        }
+    
+    # ========== PERSON D'S VALIDATION CODE ENDS HERE ==========
     
     def warp_mask(self, mask: np.ndarray, M: np.ndarray, 
                   target_shape: Tuple[int, int]) -> np.ndarray:
         
         height, width = target_shape
         
-        # Check if using homography (3x3) or affine (2x3)
         if M.shape == (3, 3):
-            # Homography transformation (perspective warp)
             warped_mask = cv2.warpPerspective(mask, M, (width, height))
         elif M.shape == (2, 3):
-            # Affine transformation
             warped_mask = cv2.warpAffine(mask, M, (width, height))
         else:
-            raise ValueError(f"Invalid transformation matrix shape: {M.shape}. "
-                           f"Expected (2,3) for affine or (3,3) for homography")
+            raise ValueError(f"Invalid transformation matrix shape: {M.shape}")
         
-        # Ensure binary mask (threshold at 127 to handle interpolation artifacts)
         _, warped_mask = cv2.threshold(warped_mask, 127, 255, cv2.THRESH_BINARY)
         return warped_mask
     
     def propagate_annotation(self, prev_frame: np.ndarray, 
                            prev_mask: np.ndarray,
                            next_frame: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """
+        Propagate annotation using multi-candidate selection with segment-based validation
+        
+        THIS IS THE MAIN INTERFACE - UNCHANGED FROM ORIGINAL
+        
+        Returns:
+            Best warped mask and metrics dictionary
+        """
         metrics = {
             'matches': 0,
-            'inliers': 0,
+            'candidates_generated': 0,
+            'best_candidate_idx': -1,
+            'best_candidate_score': float('inf'),
             'transform_success': False
         }
         
@@ -227,26 +411,210 @@ class AnnotationPropagator:
         
         if desc1 is None or desc2 is None:
             print("Feature extraction failed")
-            # Return empty mask with correct shape
             return np.zeros(next_gray.shape, dtype=np.uint8), metrics
         
         # Match features
         matches = self.match_features(desc1, desc2)
         metrics['matches'] = len(matches)
         
-        # Estimate transformation
-        M, best_point_indices = self.estimate_transform(kp1, kp2, matches)
+        # Generate multiple transformation candidates
+        candidates = self.estimate_transform_candidates(kp1, kp2, matches)
+        metrics['candidates_generated'] = len(candidates)
         
-        if M is None:
-            print("Transform estimation failed")
-            # Return empty mask with correct shape
+        if not candidates:
+            print("No valid transformation candidates found")
             return np.zeros(next_gray.shape, dtype=np.uint8), metrics
         
-        metrics['transform_success'] = True
-        metrics['best_point_indices'] = best_point_indices
+        # Pre-segment the next frame once (reuse for all candidates)
+        print("Pre-segmenting target frame...")
+        segments = self.segment_image(next_frame)
+        print(f"Found {len(np.unique(segments))} segments")
         
-        # Warp and return mask
-        warped_mask = self.warp_mask(prev_mask, M, next_gray.shape)
-        return warped_mask, metrics
+        # Evaluate each candidate using Person D's validation
+        best_score = float('inf')
+        best_mask = None
+        best_idx = -1
+        
+        print(f"\nEvaluating {len(candidates)} candidates...")
+        for idx, (M, point_indices, inlier_count) in enumerate(candidates):
+            # Warp the mask using this transformation
+            warped_mask = self.warp_mask(prev_mask, M, next_gray.shape)
+            
+            # Evaluate this candidate using segment overlap
+            eval_result = self.evaluate_candidate(warped_mask, segments)
+            
+            print(f"  Candidate {idx+1}: inliers={inlier_count}, "
+                  f"validation_score={eval_result['score']:.4f}, "
+                  f"segments={eval_result['num_segments']}")
+            
+            if eval_result['score'] < best_score:
+                best_score = eval_result['score']
+                best_mask = warped_mask
+                best_idx = idx
+        
+        print(f"Selected candidate {best_idx+1} with validation score {best_score:.4f}")
+        
+        metrics['transform_success'] = True
+        metrics['best_candidate_idx'] = best_idx
+        metrics['best_candidate_score'] = best_score
+        metrics['best_point_indices'] = candidates[best_idx][1] if best_idx >= 0 else []
+        metrics['segmentation_method'] = self.segmentation_method
+        
+        return best_mask, metrics
     
-
+    def visualize_best_transformation_points(self, img1: np.ndarray, kp1: List,
+                                            img2: np.ndarray, kp2: List,
+                                            matches: List[cv2.DMatch],
+                                            best_point_indices: List[int]) -> np.ndarray:
+        if not best_point_indices:
+            print("No best point indices provided")
+            return np.hstack([img1, img2])
+        
+        best_matches = [matches[i] for i in best_point_indices]
+        
+        match_img = cv2.drawMatches(
+            img1, kp1, img2, kp2, best_matches, None,
+            matchColor=(0, 255, 0),
+            singlePointColor=(255, 0, 0),
+            matchesMask=None,
+            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+        )
+        
+        for idx, match_idx in enumerate(best_point_indices):
+            match = matches[match_idx]
+            
+            pt1 = tuple(map(int, kp1[match.queryIdx].pt))
+            pt2 = tuple(map(int, kp2[match.trainIdx].pt))
+            pt2_shifted = (pt2[0] + img1.shape[1], pt2[1])
+            
+            cv2.circle(match_img, pt1, 15, (0, 255, 255), 3)
+            cv2.circle(match_img, pt2_shifted, 15, (0, 255, 255), 3)
+            
+            cv2.putText(match_img, str(idx + 1), 
+                       (pt1[0] - 10, pt1[1] - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+            cv2.putText(match_img, str(idx + 1), 
+                       (pt2_shifted[0] - 10, pt2_shifted[1] - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
+        
+        num_points = len(best_point_indices)
+        transform_type = "Homography" if num_points == 4 else "Affine"
+        title = f"Best {num_points} Points for {transform_type} Transformation Matrix"
+        cv2.putText(match_img, title, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        
+        return match_img
+    
+    def visualize_keypoints(self, image: np.ndarray, 
+                          keypoints: List,
+                          title: str = "Keypoints") -> np.ndarray:
+        """Visualize SIFT keypoints on an image"""
+        img_with_kp = cv2.drawKeypoints(
+            image, keypoints, None,
+            flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS
+        )
+        
+        cv2.putText(img_with_kp, f"Keypoints: {len(keypoints)}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        return img_with_kp
+    
+    def visualize_matches(self, img1: np.ndarray, kp1: List,
+                         img2: np.ndarray, kp2: List,
+                         matches: List[cv2.DMatch],
+                         max_matches: int = 50) -> np.ndarray:
+        """Visualize feature matches between two images"""
+        top_matches = sorted(matches, key=lambda x: x.distance)[:max_matches]
+        match_img = cv2.drawMatches(
+            img1, kp1, img2, kp2, top_matches, None,
+            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+        )
+        
+        cv2.putText(match_img, f"Matches: {len(matches)} (showing top {len(top_matches)})", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        if top_matches:
+            avg_dist = np.mean([m.distance for m in top_matches])
+            cv2.putText(match_img, f"Avg distance: {avg_dist:.2f}", 
+                       (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        return match_img
+    
+    def visualize_propagation_pipeline(self, prev_frame: np.ndarray,
+                                      prev_mask: np.ndarray,
+                                      next_frame: np.ndarray,
+                                      save_dir: str = ".") -> dict:
+        """Run propagation and generate visualization images for each step"""
+        import os
+        
+        results = {}
+        
+        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY) \
+                    if len(prev_frame.shape) == 3 else prev_frame
+        next_gray = cv2.cvtColor(next_frame, cv2.COLOR_BGR2GRAY) \
+                    if len(next_frame.shape) == 3 else next_frame
+        
+        kp1, desc1 = self.extract_object_features(prev_gray, prev_mask)
+        kp2, desc2 = self.detect_and_compute(next_gray)
+        
+        kp1_vis = self.visualize_keypoints(prev_frame.copy(), kp1, "Source Keypoints")
+        kp1_path = os.path.join(save_dir, "01_keypoints_source.png")
+        cv2.imwrite(kp1_path, kp1_vis)
+        results['keypoints_source'] = kp1_path
+        print(f"Saved: {kp1_path}")
+        
+        kp2_vis = self.visualize_keypoints(next_frame.copy(), kp2, "Target Keypoints")
+        kp2_path = os.path.join(save_dir, "02_keypoints_target.png")
+        cv2.imwrite(kp2_path, kp2_vis)
+        results['keypoints_target'] = kp2_path
+        print(f"Saved: {kp2_path}")
+        
+        if desc1 is None or desc2 is None:
+            print("Feature extraction failed")
+            return results
+        
+        matches = self.match_features(desc1, desc2)
+        
+        if len(matches) > 0:
+            match_vis = self.visualize_matches(prev_frame, kp1, next_frame, kp2, matches)
+            match_path = os.path.join(save_dir, "03_feature_matches.png")
+            cv2.imwrite(match_path, match_vis)
+            results['matches'] = match_path
+            print(f"Saved: {match_path}")
+        
+        propagated_mask, metrics = self.propagate_annotation(
+            prev_frame, prev_mask, next_frame
+        )
+        
+        if metrics.get('best_point_indices'):
+            best_points_vis = self.visualize_best_transformation_points(
+                prev_frame, kp1, next_frame, kp2, matches, 
+                metrics['best_point_indices']
+            )
+            best_points_path = os.path.join(save_dir, "03b_best_transformation_points.png")
+            cv2.imwrite(best_points_path, best_points_vis)
+            results['best_points'] = best_points_path
+            print(f"Saved: {best_points_path}")
+        
+        overlay = next_frame.copy()
+        overlay[propagated_mask > 0] = [0, 255, 0]
+        result = cv2.addWeighted(next_frame, 0.7, overlay, 0.3, 0)
+        
+        cv2.putText(result, f"Matches: {metrics['matches']}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(result, f"Candidates: {metrics['candidates_generated']}", (10, 70),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        cv2.putText(result, f"Validation Score: {metrics['best_candidate_score']:.4f}", (10, 110),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        result_path = os.path.join(save_dir, "04_propagated_result.png")
+        cv2.imwrite(result_path, result)
+        results['result'] = result_path
+        print(f"Saved: {result_path}")
+        
+        mask_path = os.path.join(save_dir, "05_propagated_mask.png")
+        cv2.imwrite(mask_path, propagated_mask)
+        results['mask'] = mask_path
+        print(f"Saved: {mask_path}")
+        
+        results['metrics'] = metrics
+        return results
