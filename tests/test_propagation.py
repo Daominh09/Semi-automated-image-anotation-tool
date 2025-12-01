@@ -7,132 +7,180 @@ if PROJECT_ROOT not in sys.path:
 from modules.propagation import AnnotationPropagator
 
 
-if __name__ == "__main__":
-    import sys
-    import os
+def test_category(propagator, category_path, category_name, output_base_dir):
+    """Test propagation for all images in a category"""
+    
+    # Define paths
+    ref_img_path = os.path.join(category_path, "ref_img.png")
+    ref_mask_path = os.path.join(category_path, "ref_img_mask.png")
+    
+    # Check if reference files exist
+    if not os.path.exists(ref_img_path):
+        print(f"Warning: {ref_img_path} not found, skipping category {category_name}")
+        return
+    if not os.path.exists(ref_mask_path):
+        print(f"Warning: {ref_mask_path} not found, skipping category {category_name}")
+        return
+    
+    # Load reference image and mask
+    ref_frame = cv2.imread(ref_img_path)
+    ref_mask = cv2.imread(ref_mask_path, cv2.IMREAD_GRAYSCALE)
+    
+    if ref_frame is None or ref_mask is None:
+        print(f"Error loading reference files for {category_name}")
+        return
+    
+    # Resize reference image if larger edge exceeds 500 pixels
+    h, w = ref_frame.shape[:2]
+    max_edge = max(h, w)
+    
+    if max_edge > 500:
+        scale = 500 / max_edge
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        ref_frame = cv2.resize(ref_frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        ref_mask = cv2.resize(ref_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        print(f"Reference resized from {w}x{h} to {new_w}x{new_h}")
+    else:
+        print(f"Reference size {w}x{h} - no resizing needed")
+    
+    print(f"\n{'='*60}")
+    print(f"Testing category: {category_name}")
+    print(f"{'='*60}")
+    print(f"Reference image: {ref_img_path}")
+    print(f"Reference mask: {ref_mask_path}")
+    
+    # Create output directory for this category
+    category_output_dir = os.path.join(output_base_dir, category_name)
+    os.makedirs(category_output_dir, exist_ok=True)
+    
+    # Test on img1.png through img5.png
+    results_summary = []
+    
+    for i in range(1, 6):
+        img_filename = f"img{i}.png"
+        img_path = os.path.join(category_path, img_filename)
+        
+        if not os.path.exists(img_path):
+            print(f"  Warning: {img_path} not found, skipping")
+            continue
+        
+        next_frame = cv2.imread(img_path)
+        if next_frame is None:
+            print(f"  Error loading {img_path}, skipping")
+            continue
+        
+        # Resize next frame if larger edge exceeds 500 pixels
+        h_next, w_next = next_frame.shape[:2]
+        max_edge_next = max(h_next, w_next)
+        
+        if max_edge_next > 500:
+            scale_next = 500 / max_edge_next
+            new_w_next = int(w_next * scale_next)
+            new_h_next = int(h_next * scale_next)
+            next_frame = cv2.resize(next_frame, (new_w_next, new_h_next), interpolation=cv2.INTER_AREA)
+            print(f"\n  Processing: {img_filename} (resized from {w_next}x{h_next} to {new_w_next}x{new_h_next})")
+        else:
+            print(f"\n  Processing: {img_filename} (size: {w_next}x{h_next})")
+        
+        # Propagate annotation
+        propagated_mask, metrics = propagator.propagate_annotation(
+            ref_frame, ref_mask, next_frame
+        )
+        
+        print(f"    Matches: {metrics['matches']}")
+        print(f"    Inliers: {metrics['inliers']}")
+        print(f"    Transform success: {metrics['transform_success']}")
+        
+        # Create visualization
+        overlay = next_frame.copy()
+        overlay[propagated_mask > 0] = [0, 255, 0]
+        result = cv2.addWeighted(next_frame, 0.7, overlay, 0.3, 0)
+        
+        # Save outputs
+        mask_output_path = os.path.join(category_output_dir, f"mask_{i}.png")
+        result_output_path = os.path.join(category_output_dir, f"result_{i}.png")
+        
+        cv2.imwrite(mask_output_path, propagated_mask)
+        cv2.imwrite(result_output_path, result)
+        
+        print(f"    Saved: {mask_output_path}")
+        print(f"    Saved: {result_output_path}")
+        
+        # Store results for summary
+        results_summary.append({
+            'image': img_filename,
+            'matches': metrics['matches'],
+            'inliers': metrics['inliers'],
+            'success': metrics['transform_success']
+        })
+    
+    # Print category summary
+    print(f"\n  Category Summary for {category_name}:")
+    print(f"  {'Image':<12} {'Matches':<10} {'Inliers':<10} {'Success'}")
+    print(f"  {'-'*50}")
+    for result in results_summary:
+        print(f"  {result['image']:<12} {result['matches']:<10} {result['inliers']:<10} {result['success']}")
+    
+    return results_summary
 
+
+if __name__ == "__main__":
     # Initialize propagator
     propagator = AnnotationPropagator()
     print("SIFT Annotation Propagator initialized")
-
-    # Check command line args
-    if len(sys.argv) < 4:
-        print("Usage: python script.py <image1_path> <image2_path> <mask_path> [--visualize|-v]")
-        print("Example: python script.py prev.jpg next.jpg mask.png --visualize")
+    
+    # Define test images base directory
+    test_images_dir = "test_images"
+    
+    if not os.path.exists(test_images_dir):
+        print(f"Error: Test images directory '{test_images_dir}' not found")
         sys.exit(1)
-
-    img1_path = sys.argv[1]
-    img2_path = sys.argv[2]
-    mask_path = sys.argv[3]
-    visualize_mode = "--visualize" in sys.argv or "-v" in sys.argv
-
-    # Load images
-    prev_frame = cv2.imread(img1_path)
-    next_frame = cv2.imread(img2_path)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-
-    if prev_frame is None:
-        print(f"Error: Could not load image {img1_path}")
-        sys.exit(1)
-    if next_frame is None:
-        print(f"Error: Could not load image {img2_path}")
-        sys.exit(1)
-    if mask is None:
-        print(f"Error: Could not load mask {mask_path}")
-        sys.exit(1)
-
-    print(f"Loaded images: {img1_path}, {img2_path}")
-    print(f"Loaded mask: {mask_path}")
-    print(
-        f"Image shapes: prev={prev_frame.shape}, "
-        f"next={next_frame.shape}, mask={mask.shape}"
-    )
-
-    if visualize_mode:
-        print("\n=== Running visualization pipeline ===")
-        output_dir = "visualization_output"
-        os.makedirs(output_dir, exist_ok=True)
-
-        results = propagator.visualize_propagation_pipeline(
-            prev_frame, mask, next_frame, save_dir=output_dir
-        )
-
-        print("\n=== Visualization complete ===")
-        print(f"Output directory: {output_dir}")
-        print(f"Metrics: {results.get('metrics', {})}")
-
-        # Show windows if images exist
-        if results.get("keypoints_source"):
-            img = cv2.imread(results["keypoints_source"])
-            cv2.imshow("1. Source Keypoints", img)
-
-        if results.get("keypoints_target"):
-            img = cv2.imread(results["keypoints_target"])
-            cv2.imshow("2. Target Keypoints", img)
-
-        if results.get("matches"):
-            img = cv2.imread(results["matches"])
-            cv2.imshow("3. Feature Matches", img)
-
-        if results.get("best_points"):
-            img = cv2.imread(results["best_points"])
-            cv2.imshow("3b. Inlier Points", img)
-
-        if results.get("result"):
-            img = cv2.imread(results["result"])
-            cv2.imshow("4. Propagation Result", img)
-
-        print("\nPress any key to close windows...")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    else:
-        # Simple propagation-only path
-        propagated_mask, metrics = propagator.propagate_annotation(
-            prev_frame, mask, next_frame
-        )
-
-        print("\nPropagation metrics:")
-        print(f"  Matches: {metrics['matches']}")
-        print(f"  Inliers: {metrics['inliers']}")
-        print(f"  Transform success: {metrics['transform_success']}")
-
-        overlay = next_frame.copy()
-        print(f"Overlay shape: {overlay.shape}")
-        print(f"Propagated mask shape: {propagated_mask.shape}")
-        overlay[propagated_mask > 0] = [0, 255, 0]
-        result = cv2.addWeighted(next_frame, 0.7, overlay, 0.3, 0)
-
-        cv2.putText(
-            result,
-            f"Matches: {metrics['matches']}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
-        cv2.putText(
-            result,
-            f"Success: {metrics['transform_success']}",
-            (10, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
-
-        # Save outputs
-        output_mask_path = "propagated_mask.png"
-        output_result_path = "result_visualization.png"
-        cv2.imwrite(output_mask_path, propagated_mask)
-        cv2.imwrite(output_result_path, result)
-        print(f"\nPropagated mask saved: {output_mask_path}")
-        print(f"Visualization saved: {output_result_path}")
-
-        # Show results
-        cv2.imshow("Propagated Annotation", result)
-        cv2.imshow("Propagated Mask", propagated_mask)
-        print("\nPress any key to close windows...")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    
+    # Define categories
+    categories = ["book", "controller", "knife"]
+    
+    # Create main output directory
+    output_base_dir = "propagation_results"
+    os.makedirs(output_base_dir, exist_ok=True)
+    
+    print(f"\n{'='*60}")
+    print(f"Starting batch annotation propagation test")
+    print(f"Output directory: {output_base_dir}")
+    print(f"{'='*60}")
+    
+    # Store all results
+    all_results = {}
+    
+    # Test each category
+    for category in categories:
+        category_path = os.path.join(test_images_dir, category)
+        
+        if not os.path.exists(category_path):
+            print(f"\nWarning: Category directory '{category_path}' not found, skipping")
+            continue
+        
+        results = test_category(propagator, category_path, category, output_base_dir)
+        if results:
+            all_results[category] = results
+    
+    # Print final summary
+    print(f"\n{'='*60}")
+    print(f"FINAL SUMMARY - All Categories")
+    print(f"{'='*60}")
+    
+    for category, results in all_results.items():
+        total_images = len(results)
+        successful = sum(1 for r in results if r['success'])
+        avg_matches = sum(r['matches'] for r in results) / total_images if total_images > 0 else 0
+        avg_inliers = sum(r['inliers'] for r in results) / total_images if total_images > 0 else 0
+        
+        print(f"\n{category.upper()}:")
+        print(f"  Total images: {total_images}")
+        print(f"  Successful: {successful}/{total_images} ({100*successful/total_images:.1f}%)")
+        print(f"  Avg matches: {avg_matches:.1f}")
+        print(f"  Avg inliers: {avg_inliers:.1f}")
+    
+    print(f"\n{'='*60}")
+    print(f"All results saved to: {output_base_dir}")
+    print(f"{'='*60}")

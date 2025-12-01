@@ -21,9 +21,9 @@ class AnnotationPropagator:
                 next_sift_params=None):
 
         # Default SIFT params if none provided
-        default_prev = dict(nfeatures=10000, contrastThreshold=0.08,
+        default_prev = dict(nfeatures=10000, contrastThreshold=0.03,
                             edgeThreshold=10)
-        default_next = dict(nfeatures=10000, contrastThreshold=0.08,
+        default_next = dict(nfeatures=10000, contrastThreshold=0.03,
                             edgeThreshold=10)
 
         prev_sift_params = prev_sift_params or default_prev

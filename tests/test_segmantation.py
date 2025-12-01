@@ -11,6 +11,20 @@ def _interactive_demo(path):
     if img is None:
         print("couldn't read:", path)
         return
+    
+    # Resize image if larger edge exceeds 1000 pixels
+    h, w = img.shape[:2]
+    max_edge = max(h, w)
+    
+    if max_edge > 500:
+        scale = 500 / max_edge
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        print(f"Resized from {w}x{h} to {new_w}x{new_h}")
+    else:
+        print(f"Image size {w}x{h} - no resizing needed")
+    
     rg = RegionGrowing()
     win = "RegionGrowing - Segmentation"
     cv2.namedWindow(win)
@@ -47,8 +61,16 @@ def _interactive_demo(path):
             rg.clear_seeds(); print("clear"); update()
         elif k==ord('s'):
             if rg.current_mask is not None:
-                os.makedirs(os.path.join(PROJECT_ROOT, 'test_images', 'test_object_segmantation'), exist_ok=True)
-                cv2.imwrite(os.path.join(PROJECT_ROOT, 'test_images', 'test_object_segmantation', 'test_mask.png'), rg.current_mask)
+                # Get the directory and filename of the input image
+                input_dir = os.path.dirname(os.path.abspath(path))
+                input_filename = os.path.basename(path)
+                input_name, input_ext = os.path.splitext(input_filename)
+                
+                # Create output filename in the same directory
+                output_path = os.path.join(input_dir, f"{input_name}_mask.png")
+                
+                cv2.imwrite(output_path, rg.current_mask)
+                print(f"Mask saved to: {output_path}")
                 break
             else:
                 print("no mask to save - add seeds first")
