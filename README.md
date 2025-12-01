@@ -18,7 +18,7 @@ python tests/test_preprocessing.py
 
 ### Test object segmantation
 ```bash
-python tests/test_segmantation.py
+python tests/test_segmantation.py input_image.png
 ```
 
 ### Test propagation
