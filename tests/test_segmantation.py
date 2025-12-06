@@ -11,8 +11,7 @@ def _interactive_demo(path):
     if img is None:
         print("couldn't read:", path)
         return
-    
-    # Resize image if larger edge exceeds 1000 pixels
+
     h, w = img.shape[:2]
     max_edge = max(h, w)
     
@@ -61,12 +60,10 @@ def _interactive_demo(path):
             rg.clear_seeds(); print("clear"); update()
         elif k==ord('s'):
             if rg.current_mask is not None:
-                # Get the directory and filename of the input image
                 input_dir = os.path.dirname(os.path.abspath(path))
                 input_filename = os.path.basename(path)
                 input_name, input_ext = os.path.splitext(input_filename)
                 
-                # Create output filename in the same directory
                 output_path = os.path.join(input_dir, f"{input_name}_mask.png")
                 
                 cv2.imwrite(output_path, rg.current_mask)

@@ -6,7 +6,6 @@ from collections import deque
 
 
 class AnnotationPropagator:
-    """Propagates annotations between frames using SIFT feature matching"""
     
     # SIFT parameters
     DEFAULT_MATCH_RATIO = 0.85
@@ -37,12 +36,11 @@ class AnnotationPropagator:
         self.detector_prev = cv2.SIFT_create(**prev_sift_params)
         self.detector_next = cv2.SIFT_create(**next_sift_params)
 
-        # Other parameters
         self.match_ratio = self.DEFAULT_MATCH_RATIO
         self.min_matches = self.DEFAULT_MIN_MATCHES
         self.num_candidates = num_candidates or self.DEFAULT_NUM_CANDIDATES
         
-        # Validation parameters (Person D's work)
+        # Validation parameters
         self.segmentation_method = segmentation_method
         self.min_segment_overlap = min_segment_overlap
         self.normalize_for_validation = normalize_for_validation
@@ -74,7 +72,7 @@ class AnnotationPropagator:
         
         # Loop through each descriptor in desc1 (reference/query image)
         for ref_idx in range(len(desc1)):
-            # Find the closest and second closest distances to descriptors in desc2 (train image)
+            # Find the closest and second closest distances to descriptors in desc2
             best_distance = float('inf')
             best_test_idx = -1
             second_best_distance = float('inf')
@@ -121,7 +119,6 @@ class AnnotationPropagator:
     def estimate_transform_candidates(self, kp1: List, kp2: List, 
                                      matches: List[cv2.DMatch],
                                      num_candidates: int = None) -> List[Tuple[np.ndarray, List[int], int]]:
-        """Generate multiple transformation candidates using RANSAC"""
         if num_candidates is None:
             num_candidates = self.num_candidates
             
@@ -195,8 +192,6 @@ class AnnotationPropagator:
         
         return candidates
     
-    # ========== PERSON D'S VALIDATION CODE STARTS HERE ==========
-    
     def _normalize_for_segmentation(self, image: np.ndarray) -> Tuple[np.ndarray, float]:
         """Normalize image for consistent segmentation"""
         if not self.normalize_for_validation:
@@ -223,10 +218,6 @@ class AnnotationPropagator:
                          interpolation=cv2.INTER_NEAREST).astype(np.int32)
     
     def segment_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Segment image into regions for validation
-        Person D's segmentation implementation
-        """
         original_shape = image.shape
         
         # Normalize for consistent segmentation
@@ -254,7 +245,6 @@ class AnnotationPropagator:
         return labels
     
     def _watershed_segmentation(self, image: np.ndarray, gray: np.ndarray) -> np.ndarray:
-        """Watershed segmentation"""
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -283,7 +273,6 @@ class AnnotationPropagator:
         return markers.astype(np.int32)
     
     def _slic_segmentation(self, image: np.ndarray) -> np.ndarray:
-        """SLIC superpixel segmentation"""
         try:
             slic = cv2.ximgproc.createSuperpixelSLIC(image, region_size=20, ruler=10.0)
             slic.iterate(10)
@@ -295,7 +284,6 @@ class AnnotationPropagator:
             return self._watershed_segmentation(image, gray)
     
     def _grid_segmentation(self, gray: np.ndarray) -> np.ndarray:
-        """Simple grid-based segmentation (fallback)"""
         h, w = gray.shape
         segment_size = 20
         labels = np.zeros((h, w), dtype=np.int32)
@@ -310,10 +298,6 @@ class AnnotationPropagator:
     
     def evaluate_candidate(self, warped_mask: np.ndarray,
                           target_segments: np.ndarray) -> Dict[str, float]:
-        """
-        Evaluate a single transformation candidate
-        Person D's scoring implementation
-        """
         warped_area = np.sum(warped_mask > 0)
         
         if warped_area == 0:
@@ -363,7 +347,6 @@ class AnnotationPropagator:
             'num_segments': int(len(overlapping_segments))
         }
     
-    # ========== PERSON D'S VALIDATION CODE ENDS HERE ==========
     
     def warp_mask(self, mask: np.ndarray, M: np.ndarray, 
                   target_shape: Tuple[int, int]) -> np.ndarray:
@@ -383,14 +366,6 @@ class AnnotationPropagator:
     def propagate_annotation(self, prev_frame: np.ndarray, 
                            prev_mask: np.ndarray,
                            next_frame: np.ndarray) -> Tuple[np.ndarray, dict]:
-        """
-        Propagate annotation using multi-candidate selection with segment-based validation
-        
-        THIS IS THE MAIN INTERFACE - UNCHANGED FROM ORIGINAL
-        
-        Returns:
-            Best warped mask and metrics dictionary
-        """
         metrics = {
             'matches': 0,
             'candidates_generated': 0,
@@ -425,12 +400,10 @@ class AnnotationPropagator:
             print("No valid transformation candidates found")
             return np.zeros(next_gray.shape, dtype=np.uint8), metrics
         
-        # Pre-segment the next frame once (reuse for all candidates)
         print("Pre-segmenting target frame...")
         segments = self.segment_image(next_frame)
         print(f"Found {len(np.unique(segments))} segments")
         
-        # Evaluate each candidate using Person D's validation
         best_score = float('inf')
         best_mask = None
         best_idx = -1

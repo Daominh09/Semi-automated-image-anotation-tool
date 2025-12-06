@@ -4,7 +4,7 @@ import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QComboBox, 
                              QFileDialog, QTabWidget, QMessageBox, QSlider,
-                             QSpinBox, QGroupBox, QFormLayout)
+                             QSpinBox, QDoubleSpinBox, QGroupBox, QFormLayout)
 from PyQt5.QtCore import Qt, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen
 
@@ -141,9 +141,10 @@ class EdgeDetectionTab(QWidget):
         param_layout = QFormLayout()
         
         # Gaussian sigma
-        self.sigma_spin = QSpinBox()
-        self.sigma_spin.setRange(1, 10)
-        self.sigma_spin.setValue(int(self.edge_detector.gaussian_sigma))
+        self.sigma_spin = QDoubleSpinBox()
+        self.sigma_spin.setRange(0.1, 10.0)
+        self.sigma_spin.setValue(self.edge_detector.gaussian_sigma)
+        self.sigma_spin.setSingleStep(0.1)
         param_layout.addRow("Gaussian Sigma:", self.sigma_spin)
         
         # Canny thresholds
@@ -392,7 +393,6 @@ class SegmentationTab(QWidget):
             self.save_seg_btn.setEnabled(False)
             self.status_label.setText("Click on the object to segment")
         else:
-            # Re-segment with remaining seeds
             threshold = self.threshold_spin.value()
             mask, contours = self.region_grower.segment(
                 self.current_image, threshold=threshold, smooth=True
@@ -432,7 +432,6 @@ class SegmentationTab(QWidget):
         )
         if filename:
             cv2.imwrite(filename, self.region_grower.current_mask)
-            # Store the original image and mask for propagation
             self.original_image = self.current_image.copy()
             self.original_mask = self.region_grower.current_mask.copy()
             self.load_next_btn.setEnabled(True)
@@ -453,17 +452,15 @@ class SegmentationTab(QWidget):
         if filename:
             next_frame = cv2.imread(filename)
             if next_frame is not None:
-                # Propagate annotation using ORIGINAL image and mask
                 self.status_label.setText("Propagating annotation from original frame...")
                 QApplication.processEvents()
                 
                 propagated_mask, metrics = self.propagator.propagate_annotation(
-                    self.original_image,  # Use original annotated image
-                    self.original_mask,   # Use original high-quality mask
+                    self.original_image,  
+                    self.original_mask,   
                     next_frame
                 )
                 
-                # Update ONLY the current display, not the original
                 self.current_image = next_frame
                 self.segmentation_mask = propagated_mask
                 
