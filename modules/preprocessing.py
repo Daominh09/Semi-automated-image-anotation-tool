@@ -58,31 +58,15 @@ class EdgeDetector:
             high_threshold = self.canny_high
         
         return cv2.Canny(image, low_threshold, high_threshold)
-    
-    def morphological_gradient(self, image: np.ndarray, kernel_size: int = 3) -> np.ndarray:
-
-        kernel = np.ones((kernel_size,kernel_size), np.uint8)
-        dilated = cv2.dilate(image, kernel, iterations=1)
-        eroded = cv2.erode(image, kernel, iterations=1)
-
-        morph_gradient = cv2.absdiff(dilated, eroded)
-
-        _, edge_map = cv2.threshold(morph_gradient, 40, 255, cv2.THRESH_BINARY)
-        return edge_map
 
     def sobel_edge_detection(self, image: np.ndarray, kernel_size: Optional[int] = None) -> np.ndarray:
 
         if kernel_size is None:
             kernel_size = self.sobel_kernel
-        
-        # Compute gradients
+    
         grad_x = cv2.Sobel(image, cv2.CV_64F, 1, 0, ksize=kernel_size)
         grad_y = cv2.Sobel(image, cv2.CV_64F, 0, 1, ksize=kernel_size)
-        
-        # Compute magnitude
         magnitude = np.sqrt(grad_x**2 + grad_y**2)
-        
-        # Normalize to 0-255
         magnitude = np.uint8(255 * magnitude / np.max(magnitude))
         
         return magnitude
@@ -104,68 +88,32 @@ class EdgeDetector:
         
         return combined_edges
     
-    def morphological_closing_cleanup(self, edge_map: np.ndarray, kernel_size: int = 3) -> np.ndarray:
+    def morphological_closing(self, edge_map: np.ndarray, kernel_size: int = 3) -> np.ndarray:
 
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
         return cv2.morphologyEx(edge_map, cv2.MORPH_CLOSE, kernel)
     
-    def neighborhood_cleanup(self, edge_map: np.ndarray, threshold: int = 2) -> np.ndarray:
-
-        binary_map = (edge_map > 0).astype(np.uint8)
-
-        kernel = np.array([[1, 1, 1],
-                        [1, 0, 1],
-                        [1, 1, 1]], dtype=np.uint8)
-
-        neighbor_counts = cv2.filter2D(binary_map, -1, kernel)
-
-        cleaned = np.where(neighbor_counts >= threshold, 255, 0).astype(np.uint8)
-
-        return cleaned
-    
-    def get_clean_edges(self, image: np.ndarray, method: str = 'canny', cleanup_method: str = 'morphological') -> np.ndarray:
-        """
-        Main function: Get clean edge map from input image
-        
-        Args:
-            image: Input BGR or grayscale image
-            method: Edge detection method ('canny', 'sobel', or 'iterative')
-            cleanup_method: Cleanup method ('morphological' or 'neighborhood')
-            
-        Returns:
-            Clean binary edge map
-            
-        Recommended defaults:
-            - method='iterative' for complex objects
-            - cleanup_method='morphological' for speed
-            - Gaussian sigma=1.5, Canny thresholds=(50, 150)
-        """
+    def get_clean_edges(self, image: np.ndarray, method: str = 'canny') -> np.ndarray:
         # Convert to grayscale if needed
         gray = self.to_grayscale(image)
-        
-        # Apply smoothing
+        #Smooth image
         smoothed = self.apply_gaussian_smoothing(gray)
-        
         # Edge detection
         if method == 'canny':
             edges = self.canny_edge_detection(smoothed)
+
         elif method == 'sobel':
+        
             sobel_edges = self.sobel_edge_detection(smoothed)
             _, edges = cv2.threshold(sobel_edges, 100, 255, cv2.THRESH_BINARY)
+
         elif method == 'iterative':
-            edges = self.iterative_canny(gray)
-        elif method == 'morphological':
-            edges = self.morphological_gradient(smoothed)
+            edges = self.iterative_canny(smoothed)
         else:
             raise ValueError(f"Unknown method: {method}")
         
-        # Cleanup
-        if cleanup_method == 'morphological':
-            cleaned = self.morphological_closing_cleanup(edges)
-        elif cleanup_method == 'neighborhood':
-            cleaned = self.neighborhood_cleanup(edges)
-        else:
-            cleaned = edges
+        # Apply morphological cleanup
+        cleaned = self.morphological_closing(edges)
         
         return cleaned
 
@@ -177,13 +125,13 @@ if __name__ == "__main__":
     import glob
     import os
 
-    def _process_and_save(detector: EdgeDetector, path: str, out_dir: str, method: str, cleanup: str) -> bool:
+    def _process_and_save(detector: EdgeDetector, path: str, out_dir: str, method: str) -> bool:
         img = detector.load_image(path)
         if img is None:
             print(f"Skipping (can't read): {path}")
             return False
 
-        edges = detector.get_clean_edges(img, method=method, cleanup_method=cleanup)
+        edges = detector.get_clean_edges(img, method=method)
 
         # Ensure output dir exists
         os.makedirs(out_dir, exist_ok=True)
@@ -195,7 +143,7 @@ if __name__ == "__main__":
         combined = np.hstack([left, right])
 
         base = os.path.splitext(os.path.basename(path))[0]
-        out_file = os.path.join(out_dir, f"{base}_{method}_{cleanup}.png")
+        out_file = os.path.join(out_dir, f"{base}_{method}.png")
         ok = cv2.imwrite(out_file, combined)
         if ok:
             print(f"Saved: {out_file}")
@@ -207,8 +155,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EdgeDetector demo - process image(s) and save visual outputs")
     parser.add_argument("-i", "--image", help="Path to single image to process")
     parser.add_argument("-d", "--dir", help="Directory to process recursively (jpg/png)")
-    parser.add_argument("-m", "--method", choices=("canny", "sobel", "iterative", "morphological"), default="iterative")
-    parser.add_argument("-c", "--cleanup", choices=("morphological", "neighborhood", "none"), default="morphological")
+    parser.add_argument("-m", "--method", choices=("canny", "sobel", "iterative"), default="canny")
     parser.add_argument("-o", "--out", default=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'output')),
                         help="Output directory to save visualizations")
     parser.add_argument("--default-sample", action="store_true", help="Use a default sample from tests/test_images/BREAD_KNIFE")
@@ -225,21 +172,21 @@ if __name__ == "__main__":
         if not candidates:
             print('No sample images found in', sample_dir)
         else:
-            if _process_and_save(detector, candidates[0], args.out, args.method, args.cleanup):
+            if _process_and_save(detector, candidates[0], args.out, args.method):
                 processed += 1
 
     if args.image:
-        if _process_and_save(detector, args.image, args.out, args.method, args.cleanup):
+        if _process_and_save(detector, args.image, args.out, args.method):
             processed += 1
 
     if args.dir:
         for ext in ('*.jpg', '*.JPG', '*.png', '*.PNG'):
             for path in glob.glob(os.path.join(args.dir, '**', ext), recursive=True):
-                if _process_and_save(detector, path, args.out, args.method, args.cleanup):
+                if _process_and_save(detector, path, args.out, args.method):
                     processed += 1
 
     if processed == 0:
         print('\nNo images processed. Examples:')
         print('  python modules/preprocessing.py --default-sample')
         print('  python modules/preprocessing.py -i tests/test_images/BREAD_KNIFE/breadkniferaw1.jpg')
-        print('  python modules/preprocessing.py -d tests/test_images/BREAD_KNIFE -m canny -c neighborhood')
+        print('  python modules/preprocessing.py -d tests/test_images/BREAD_KNIFE -m canny')
