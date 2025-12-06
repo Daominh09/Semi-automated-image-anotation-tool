@@ -1,151 +1,87 @@
-"""
-Test script for Person B - Segmentation Module
-"""
-
 import cv2
 import numpy as np
-import sys
-sys.path.append('..')
+import sys, os
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 from modules.segmentation import RegionGrowing
 
-
-def test_region_growing():
-    """Test region growing segmentation"""
-    print("="*60)
-    print("Testing Person B - Region Growing Module")
-    print("="*60)
+def _interactive_demo(path):
+    img = cv2.imread(path)
+    if img is None:
+        print("couldn't read:", path)
+        return
     
-    # Create test image
-    test_image = np.zeros((400, 400, 3), dtype=np.uint8)
-    test_image[:] = (50, 50, 50)  # Dark background
+    # Resize image if larger edge exceeds 1000 pixels
+    h, w = img.shape[:2]
+    max_edge = max(h, w)
     
-    # Draw target object (red square with slight gradient)
-    for i in range(100, 300):
-        for j in range(100, 300):
-            # Add slight color variation
-            variation = np.random.randint(-10, 10)
-            test_image[i, j] = (200 + variation, 50 + variation, 50 + variation)
-    
-    # Initialize region grower
-    rg = RegionGrowing()
-    
-    # Test 1: Single seed segmentation
-    print("\nTest 1: Single Seed Segmentation")
-    rg.clear_seeds()
-    rg.add_seed(200, 200)  # Center of red square
-    
-    mask, contours = rg.segment(test_image, threshold=20)
-    segmented_area = np.sum(mask > 0)
-    expected_area = 200 * 200  # Should be close to 40000
-    
-    print(f"  Seed at: (200, 200)")
-    print(f"  Segmented area: {segmented_area} pixels")
-    print(f"  Expected area: ~{expected_area} pixels")
-    print(f"  Accuracy: {100 * segmented_area / expected_area:.1f}%")
-    
-    if 0.8 < segmented_area / expected_area < 1.2:
-        print(f"  ✓ Single seed segmentation works!")
+    if max_edge > 500:
+        scale = 500 / max_edge
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        print(f"Resized from {w}x{h} to {new_w}x{new_h}")
     else:
-        print(f"  ⚠ Segmentation might need threshold adjustment")
+        print(f"Image size {w}x{h} - no resizing needed")
     
-    # Test 2: Multi-seed segmentation
-    print("\nTest 2: Multi-Seed Segmentation")
+    rg = RegionGrowing()
+    win = "RegionGrowing - Segmentation"
+    cv2.namedWindow(win)
+    disp = img.copy()
     
-    # Add another object
-    cv2.circle(test_image, (300, 100), 40, (50, 200, 50), -1)
+    def update():
+        nonlocal disp
+        if rg.seeds:
+            m,_ = rg.segment(img)
+            d = rg.create_overlay(img,m)
+        else:
+            d = img.copy()
+        for sx,sy in rg.seeds:
+            cv2.circle(d,(sx,sy),3,(0,0,255),-1)
+        disp = d
+        cv2.imshow(win,disp)
     
-    rg.clear_seeds()
-    rg.add_seed(200, 200)  # Red square
-    rg.add_seed(300, 100)  # Green circle
+    def mouse_cb(ev,x,y,flags,param):
+        if ev==cv2.EVENT_LBUTTONDOWN:
+            rg.add_seed(x,y)
+            print("added:",(x,y))
+            update()
     
-    mask_multi, contours_multi = rg.segment(test_image, threshold=20)
-    num_contours = len(contours_multi)
+    cv2.setMouseCallback(win,mouse_cb)
+    print("demo running... keys: u=undo, c=clear, s=save, q=quit")
+    update()
     
-    print(f"  Seeds: (200, 200) and (300, 100)")
-    print(f"  Number of contours found: {num_contours}")
-    print(f"  Total segmented area: {np.sum(mask_multi > 0)} pixels")
-    
-    if num_contours >= 1:
-        print(f"  ✓ Multi-seed segmentation works!")
-    
-    # Test 3: Undo functionality
-    print("\nTest 3: Undo Functionality")
-    rg.clear_seeds()
-    rg.add_seed(200, 200)
-    rg.add_seed(150, 150)
-    rg.add_seed(250, 250)
-    
-    print(f"  Added 3 seeds: {len(rg.seeds)} seeds")
-    
-    rg.undo_last_seed()
-    print(f"  After undo: {len(rg.seeds)} seeds")
-    
-    if len(rg.seeds) == 2:
-        print(f"  ✓ Undo works!")
-    
-    # Test 4: Different thresholds
-    print("\nTest 4: Testing Different Thresholds")
-    rg.clear_seeds()
-    rg.add_seed(200, 200)
-    
-    for threshold in [5, 10, 20, 30, 40]:
-        mask_thresh, _ = rg.segment(test_image, threshold=threshold)
-        area = np.sum(mask_thresh > 0)
-        print(f"  Threshold={threshold}: {area} pixels segmented")
-    
-    print(f"  ✓ Threshold adjustment works (larger threshold = larger region)")
-    
-    # Test 5: Morphological smoothing
-    print("\nTest 5: Mask Smoothing")
-    rg.clear_seeds()
-    rg.add_seed(200, 200)
-    
-    mask_raw, _ = rg.segment(test_image, threshold=20, smooth=False)
-    mask_smooth, _ = rg.segment(test_image, threshold=20, smooth=True)
-    
-    # Count boundary pixels
-    raw_boundary = cv2.Canny(mask_raw, 100, 200)
-    smooth_boundary = cv2.Canny(mask_smooth, 100, 200)
-    
-    print(f"  Raw boundary pixels: {np.sum(raw_boundary > 0)}")
-    print(f"  Smoothed boundary pixels: {np.sum(smooth_boundary > 0)}")
-    print(f"  ✓ Smoothing reduces boundary noise")
-    
-    # Test 6: Contour extraction
-    print("\nTest 6: Contour Extraction")
-    largest_contour = rg.get_largest_contour(contours)
-    
-    if largest_contour is not None:
-        area = cv2.contourArea(largest_contour)
-        print(f"  Largest contour area: {area} pixels")
-        print(f"  Number of points: {len(largest_contour)}")
-        print(f"  ✓ Contour extraction works!")
-    
-    # Visual output
-    print("\nGenerating visualization...")
-    
-    # Create overlay and contour images
-    overlay = rg.create_overlay(test_image, mask, alpha=0.3)
-    contour_img = rg.draw_contours_on_image(test_image, contours, 
-                                            color=(0, 255, 0), thickness=2)
-    
-    # Combine for side-by-side comparison
-    combined = np.hstack([test_image, overlay, contour_img])
-    
-    cv2.imwrite('../data/output/test_segmentation.png', combined)
-    print("  Saved: data/output/test_segmentation.png")
-    print("  (Original | Overlay | Contours)")
-    
-    print("\n" + "="*60)
-    print("✓ All tests passed for Person B!")
-    print("="*60)
-    
-    # Display recommended parameters
-    print("\nRecommended Parameters:")
-    print(f"  Color threshold (τ): {RegionGrowing.DEFAULT_COLOR_THRESHOLD}")
-    print(f"  Grayscale threshold: {RegionGrowing.DEFAULT_GRAY_THRESHOLD}")
-    print(f"  Morphological kernel: {RegionGrowing.DEFAULT_MORPH_KERNEL}")
+    while True:
+        k = cv2.waitKey(10)&0xFF
+        if k==ord('q'): break
+        elif k==ord('u'):
+            rg.undo_last_seed(); print("undo"); update()
+        elif k==ord('c'):
+            rg.clear_seeds(); print("clear"); update()
+        elif k==ord('s'):
+            if rg.current_mask is not None:
+                # Get the directory and filename of the input image
+                input_dir = os.path.dirname(os.path.abspath(path))
+                input_filename = os.path.basename(path)
+                input_name, input_ext = os.path.splitext(input_filename)
+                
+                # Create output filename in the same directory
+                output_path = os.path.join(input_dir, f"{input_name}_mask.png")
+                
+                cv2.imwrite(output_path, rg.current_mask)
+                print(f"Mask saved to: {output_path}")
+                break
+            else:
+                print("no mask to save - add seeds first")
+    cv2.destroyAllWindows()
 
 
-if __name__ == '__main__':
-    test_region_growing()
+if __name__=="__main__":
+    import sys
+    print("RegionGrowing loaded")
+    print("defaults:",RegionGrowing.DEFAULT_COLOR_THRESHOLD,RegionGrowing.DEFAULT_GRAY_THRESHOLD,RegionGrowing.DEFAULT_MORPH_KERNEL)
+    if len(sys.argv)<2:
+        print("usage: python region_growing.py img.jpg")
+    else:
+        _interactive_demo(sys.argv[1])
