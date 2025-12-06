@@ -99,7 +99,6 @@ class RegionGrowing:
         return max(c,key=cv2.contourArea)
     
     def segment(self, img, threshold=None, smooth=True):
-        # threshold here is the same thing as "t" before
         if len(self.seeds) == 0:
             return np.zeros(img.shape[:2], np.uint8), []
 

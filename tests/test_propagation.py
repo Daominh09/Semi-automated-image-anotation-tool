@@ -89,7 +89,7 @@ def test_category(propagator, category_path, category_name, output_base_dir):
         )
         
         print(f"    Matches: {metrics['matches']}")
-        print(f"    Inliers: {metrics['inliers']}")
+        print(f"    Candidate generated: {metrics['candidates_generated']}")
         print(f"    Transform success: {metrics['transform_success']}")
         
         # Create visualization
@@ -111,16 +111,15 @@ def test_category(propagator, category_path, category_name, output_base_dir):
         results_summary.append({
             'image': img_filename,
             'matches': metrics['matches'],
-            'inliers': metrics['inliers'],
             'success': metrics['transform_success']
         })
     
     # Print category summary
     print(f"\n  Category Summary for {category_name}:")
-    print(f"  {'Image':<12} {'Matches':<10} {'Inliers':<10} {'Success'}")
+    print(f"  {'Image':<12} {'Matches':<10} {'Success'}")
     print(f"  {'-'*50}")
     for result in results_summary:
-        print(f"  {result['image']:<12} {result['matches']:<10} {result['inliers']:<10} {result['success']}")
+        print(f"  {result['image']:<12} {result['matches']:<10} {result['success']}")
     
     return results_summary
 
@@ -173,13 +172,11 @@ if __name__ == "__main__":
         total_images = len(results)
         successful = sum(1 for r in results if r['success'])
         avg_matches = sum(r['matches'] for r in results) / total_images if total_images > 0 else 0
-        avg_inliers = sum(r['inliers'] for r in results) / total_images if total_images > 0 else 0
         
         print(f"\n{category.upper()}:")
         print(f"  Total images: {total_images}")
         print(f"  Successful: {successful}/{total_images} ({100*successful/total_images:.1f}%)")
         print(f"  Avg matches: {avg_matches:.1f}")
-        print(f"  Avg inliers: {avg_inliers:.1f}")
     
     print(f"\n{'='*60}")
     print(f"All results saved to: {output_base_dir}")

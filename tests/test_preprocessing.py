@@ -48,7 +48,7 @@ def test_parameter_sensitivity(detector, image, category_name):
 def test_reference_images():
     """Test edge detection on reference images only"""
     print("="*80)
-    print("Testing Person A - Edge Detection Module - Reference Images")
+    print("Testing Edge Detection Module - Reference Images")
     print("="*80)
     
     # Initialize detector
