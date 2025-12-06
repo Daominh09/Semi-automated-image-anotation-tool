@@ -4,7 +4,7 @@ import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QComboBox, 
                              QFileDialog, QTabWidget, QMessageBox, QSlider,
-                             QSpinBox, QGroupBox, QFormLayout)
+                             QSpinBox, QDoubleSpinBox, QGroupBox, QFormLayout)
 from PyQt5.QtCore import Qt, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen
 
@@ -141,9 +141,10 @@ class EdgeDetectionTab(QWidget):
         param_layout = QFormLayout()
         
         # Gaussian sigma
-        self.sigma_spin = QSpinBox()
-        self.sigma_spin.setRange(1, 10)
-        self.sigma_spin.setValue(int(self.edge_detector.gaussian_sigma))
+        self.sigma_spin = QDoubleSpinBox()
+        self.sigma_spin.setRange(0.1, 10.0)
+        self.sigma_spin.setValue(self.edge_detector.gaussian_sigma)
+        self.sigma_spin.setSingleStep(0.1)
         param_layout.addRow("Gaussian Sigma:", self.sigma_spin)
         
         # Canny thresholds
